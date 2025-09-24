@@ -7,49 +7,89 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <div class="app app-4col">
-      <aside class="sidebar">
-        <div class="brand">数据库</div>
-        <div class="section">
-          <div class="section-title">分段</div>
-          <div id="txtList" class="list"></div>
+    <div class="app app-single">
+      <main class="main">
+        <section id="guide" class="guide" aria-labelledby="guideTitle">
+          <div class="guide-content">
+            <h1 id="guideTitle">欢迎使用连词成句</h1>
+            <p>这是一个帮你通过情境句记忆单词、还能跟 AI 聊天的轻量应用。先来快速熟悉四个主要区域吧：</p>
+            <ul>
+              <li><strong>数据库：</strong>美国当代英语语料库（Corpus of Contemporary American English），简称 COCA。由美国杨伯翰大学的 Mark Davies 教授在 2008 年创立，是目前最大的在线免费英语语料库，帮助你了解单词、短语以及句子结构的真实使用频率。COCA 涵盖口语、小说、杂志、报纸、期刊五大体裁（各约 8~9 千万词），特点就是大、全、新。我们从中挑出前 20,000 个高频词，按每 100 词分组，并为每组配上一条完整情境句，让你飞速积累词汇。</li>
+              <li><strong>情境句：</strong>按分段阅读示例句，点击单词可直接跳转到查词。</li>
+              <li><strong>查词：</strong>查看单词的原始行、音标与释义，方便对照学习。</li>
+              <li><strong>AI 对话：</strong>右上角填好硅基流动得 API Key 和想要的提示词，挑个模型，就能和 AI 边聊边学。</li>
+            </ul>
+            <p class="guide-note">记单词交流群</p>
+            <img src="/static/群.png" alt="记单词交流群二维码" class="guide-qrcode" />
+            <p class="guide-note">有想法或建议吗？加作者微信聊聊：<strong>yes_smile_peace</strong></p>
+            <button id="guideClose" class="guide-close" type="button">了解了，开始体验</button>
+          </div>
+        </section>
+
+        <!-- 情境句视图 -->
+        <div id="view-segments" class="view" aria-label="情境句视图">
+          <section class="center">
+            <div class="center-header"><span>情境句</span><button id="copyAllBtn" class="btn-copy">复制全文</button></div>
+            <div id="content" class="center-body"></div>
+          </section>
         </div>
-        <div class="section">
-          <div class="section-title">词库</div>
-          <div id="excelFiles" class="list"></div>
-        </div>
-      </aside>
 
-      <section class="center">
-        <div class="center-header"><span>情境句</span><button id="copyAllBtn" class="btn-copy">复制全文</button></div>
-        <div id="content" class="center-body"></div>
-      </section>
-
-      <aside class="chat">
-        <div class="chat-header">查词对话</div>
-        <div id="chatList" class="chat-body"></div>
-      </aside>
-
-      <aside class="ai">
-        <div class="chat-header">AI 对话</div>
-        <div class="ai-body">
-          <div id="aiList" class="ai-list"></div>
-          <div class="ai-composer">
-            <div class="composer-row top">
-              <select id="aiModel"></select>
-              <input id="aiSystem" type="text" placeholder="系统提示词（可选）" />
-              <input id="aiKey" type="password" placeholder="输入 API Key" />
-            </div>
-            <div class="composer-row">
-              <textarea id="aiInput" rows="3" placeholder="输入内容，Enter 发送，Shift+Enter 换行"></textarea>
-              <button id="aiSend">发送</button>
-            </div>
+        <!-- 数据库视图 -->
+        <div id="view-database" class="view" aria-label="词库视图">
+          <div class="section">
+            <div class="section-title">请选择一个情景句载入学习吧！</div>
+            <div id="txtList" class="list"></div>
+          </div>
+          <div class="section">
+            <div class="section-title">数据库状态</div>
+            <div id="excelFiles" class="list"></div>
           </div>
         </div>
-      </aside>
+
+        <!-- 查词视图 -->
+        <div id="view-lookup" class="view" aria-label="查词视图">
+          <div class="lookup">
+            <div class="chat-header">查词</div>
+            <div id="lookupBody" class="lookup-body"></div>
+          </div>
+        </div>
+
+        <!-- AI 对话视图 -->
+        <div id="view-ai" class="view" aria-label="AI 对话视图">
+          <div class="ai">
+            <div class="chat-header">
+              <div class="chat-title">AI 对话</div>
+              <div class="ai-toolbar" role="group" aria-label="对话设置">
+                <label class="sr-only" for="aiModel">对话模型</label>
+                <select id="aiModel" title="对话模型"></select>
+                <label class="sr-only" for="aiSystem">系统提示词</label>
+                <input id="aiSystem" type="text" placeholder="系统提示词（可选）" />
+                <div class="ai-key-field">
+                  <label class="sr-only" for="aiKey">API Key</label>
+                  <input id="aiKey" type="password" placeholder="API Key" autocomplete="off" />
+                  <button type="button" id="aiKeyToggle" class="btn-icon" aria-label="切换 API Key 可见性">显示</button>
+                </div>
+              </div>
+            </div>
+            <div id="aiList" class="ai-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+            <form id="aiComposerForm" class="ai-composer" novalidate>
+              <label class="sr-only" for="aiInput">发送内容</label>
+              <textarea id="aiInput" rows="1" placeholder="请输入内容" required></textarea>
+              <button type="submit" id="aiSend" class="btn-primary">发送</button>
+            </form>
+          </div>
+        </div>
+      </main>
+
+      <nav class="bottom-nav" role="tablist" aria-label="主导航">
+        <button class="tab" data-view="database" role="tab" aria-selected="false">数据库</button>
+        <button class="tab" data-view="segments" role="tab" aria-selected="false">情境句</button>
+        <button class="tab" data-view="lookup" role="tab" aria-selected="false">查词</button>
+        <button class="tab" data-view="ai" role="tab" aria-selected="false">AI 对话</button>
+      </nav>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script type="module" src="/static/js/main.js"></script>
   </body>
 </html>
 

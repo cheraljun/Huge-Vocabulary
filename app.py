@@ -290,10 +290,22 @@ def api_excel_files():
 
 @app.route("/api/excel/status")
 def api_excel_status():
+    # 简化：仅以数据库是否存在且包含 entries 表为准
+    actual_ready = False
+    try:
+        if os.path.exists(SQLITE_DB_PATH):
+            con = sqlite3.connect(SQLITE_DB_PATH)
+            cur = con.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='entries'")
+            actual_ready = cur.fetchone() is not None
+            con.close()
+    except Exception:
+        actual_ready = False
     return jsonify({
-        "loaded": bool(app.config.get("DATA_LOADED", False)),
+        "loaded": bool(actual_ready),
         "running": bool(loading_progress.get("running")),
         "file": loading_progress.get("file"),
+        "current_file": current_excel_file,
         "current_sheet": loading_progress.get("current_sheet"),
         "processed_words": loading_progress.get("processed_words", 0),
         "total_words": loading_progress.get("total_words", 0),
@@ -506,6 +518,7 @@ pass
 if __name__ == "__main__":
     # Auto-detect existing SQLite database on startup
     try:
+        db_ready = False
         if os.path.exists(SQLITE_DB_PATH):
             con = sqlite3.connect(SQLITE_DB_PATH)
             cur = con.cursor()
@@ -514,6 +527,33 @@ if __name__ == "__main__":
             con.close()
             if exists:
                 app.config["DATA_LOADED"] = True
+                db_ready = True
+                # Best-effort set current excel file for UI display
+                data_xlsx_path = os.path.join(BASE_DIR, "data.xlsx")
+                if os.path.exists(data_xlsx_path):
+                    current_excel_file = data_xlsx_path
+        # If DB not ready, try to auto-load once on startup
+        if not db_ready:
+            excel_candidates = [
+                name for name in os.listdir(BASE_DIR)
+                if os.path.isfile(os.path.join(BASE_DIR, name))
+                and os.path.splitext(name)[1].lower() in EXCEL_EXTENSIONS
+            ]
+            excel_candidates.sort()
+            auto_excel = excel_candidates[0] if excel_candidates else None
+            if auto_excel:
+                auto_excel_path = os.path.join(BASE_DIR, auto_excel)
+                is_main_worker = (os.environ.get("WERKZEUG_RUN_MAIN") == "true") or not bool(os.environ.get("WERKZEUG_RUN_MAIN"))
+                if os.path.exists(auto_excel_path) and is_main_worker and not loading_progress.get("running"):
+                    app.config["DATA_LOADED"] = False
+                    try:
+                        if os.path.exists(SQLITE_DB_PATH):
+                            os.remove(SQLITE_DB_PATH)
+                    except Exception:
+                        pass
+                    t = threading.Thread(target=_loader_worker, args=(auto_excel_path,), daemon=True)
+                    loading_thread = t
+                    t.start()
     except Exception:
         pass
     app.run(host="0.0.0.0", port=5000, debug=True)

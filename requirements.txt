@@ -1,5 +1,1 @@
-Flask
-pandas
-openpyxl
-xlrd
-requests
+pip install Flask pandas openpyxl xlrd requests
