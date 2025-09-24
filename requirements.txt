@@ -1,1 +1,6 @@
-pip install Flask pandas openpyxl xlrd requests
+Flask
+pandas
+openpyxl
+xlrd
+requests
+waitress

@@ -13,7 +13,6 @@ import requests
 
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
-app.config["DATA_LOADED"] = False
 
 
 # -----------------------------
@@ -24,6 +23,122 @@ TXT_EXTENSIONS = {".txt"}
 EXCEL_EXTENSIONS = {".xlsx", ".xls"}
 DATA_DIR = os.path.join(BASE_DIR, "data")
 SQLITE_DB_PATH = os.path.join(DATA_DIR, "coca.sqlite")
+STATE_FILE_PATH = os.path.join(DATA_DIR, "loading_state.json")
+
+
+class LoadingStateStore:
+    DEFAULT_STATE: Dict[str, Any] = {
+        "running": False,
+        "file": None,
+        "current_sheet": None,
+        "processed_words": 0,
+        "total_words": 0,
+        "percent": 0.0,
+        "error": None,
+        "latest_words": [],
+        "timestamp": None,
+    }
+
+    def __init__(self, path: str):
+        self.path = path
+        self.lock = threading.Lock()
+        self.state: Dict[str, Any] = self.DEFAULT_STATE.copy()
+        self._last_persist = 0.0
+        self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        if not os.path.exists(self.path):
+            # ensure directory exists for future writes
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self._persist_locked(force=True)
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                merged = self.DEFAULT_STATE.copy()
+                for key in merged.keys():
+                    if key in data:
+                        merged[key] = data[key]
+                if not isinstance(merged.get("latest_words"), list):
+                    merged["latest_words"] = []
+                self.state = merged
+        except Exception:
+            # fall back to default when corrupted
+            self.state = self.DEFAULT_STATE.copy()
+        self._persist_locked(force=True)
+
+    def _persist_locked(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and (now - self._last_persist) < 0.5:
+            return
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp_path = f"{self.path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(self.state, fh, ensure_ascii=False)
+        os.replace(tmp_path, self.path)
+        self._last_persist = now
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            return json.loads(json.dumps(self.state))
+
+    def reset_for_file(self, file_name: str, total_rows: int) -> None:
+        with self.lock:
+            self.state = self.DEFAULT_STATE.copy()
+            self.state.update({
+                "running": True,
+                "file": file_name,
+                "current_sheet": None,
+                "processed_words": 0,
+                "total_words": int(total_rows or 0),
+                "percent": 0.0,
+                "error": None,
+                "latest_words": [],
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+            self._persist_locked(force=True)
+
+    def set_current_sheet(self, sheet: Optional[str]) -> None:
+        with self.lock:
+            self.state["current_sheet"] = sheet
+            self.state["timestamp"] = datetime.utcnow().isoformat()
+            self._persist_locked()
+
+    def increment_processed(self, increment: int = 1, sample_word: Optional[str] = None,
+                             sample_step: int = 10, latest_limit: int = 40, force: bool = False) -> int:
+        with self.lock:
+            processed = self.state.get("processed_words", 0) + increment
+            self.state["processed_words"] = processed
+            total = self.state.get("total_words", 0) or 0
+            self.state["percent"] = (processed / total * 100.0) if total > 0 else 0.0
+            if sample_word and sample_word.strip():
+                if processed % sample_step == 0:
+                    latest = list(self.state.get("latest_words") or [])
+                    latest.append(sample_word)
+                    if len(latest) > latest_limit:
+                        latest = latest[-latest_limit:]
+                    self.state["latest_words"] = latest
+            self.state["timestamp"] = datetime.utcnow().isoformat()
+            self._persist_locked(force=force)
+            return processed
+
+    def mark_finished(self, error: Optional[str] = None) -> None:
+        with self.lock:
+            self.state["running"] = False
+            if error:
+                self.state["error"] = error
+            self.state["timestamp"] = datetime.utcnow().isoformat()
+            self._persist_locked(force=True)
+
+    def clear_error(self) -> None:
+        with self.lock:
+            self.state["error"] = None
+            self.state["timestamp"] = datetime.utcnow().isoformat()
+            self._persist_locked()
+
+
+loading_state = LoadingStateStore(STATE_FILE_PATH)
 
 
 # -----------------------------
@@ -34,16 +149,6 @@ current_excel_file: Optional[str] = None
 # Loading state
 loading_thread: Optional[threading.Thread] = None
 loading_cancelled: bool = False
-loading_progress: Dict[str, Any] = {
-    "running": False,
-    "file": None,
-    "current_sheet": None,
-    "processed_words": 0,
-    "total_words": 0,
-    "percent": 0.0,
-    "error": None,
-    "latest_words": [],
-}
 
 
 def normalize_word(word: str) -> str:
@@ -138,7 +243,7 @@ def _rebuild_sqlite_from_excel(file_path: str) -> None:
         # Sampling config for preview
         SAMPLE_STEP = 10
         LATEST_LIMIT = 40
-        loading_progress["latest_words"] = []
+        loading_state.clear_error()
 
         insert_sql = (
             "INSERT INTO entries (word_norm, word, phonetic, meaning, sheet, row_index) VALUES (?, ?, ?, ?, ?, ?)"
@@ -146,7 +251,7 @@ def _rebuild_sqlite_from_excel(file_path: str) -> None:
 
         # We reuse total_words computed by caller; processed_words is reset in caller
         for sheet in sheets:
-            loading_progress["current_sheet"] = sheet
+            loading_state.set_current_sheet(sheet)
             ws = wb[sheet]
             # choose word column index based on worksheet column count
             max_cols = ws.max_column or 1
@@ -169,29 +274,22 @@ def _rebuild_sqlite_from_excel(file_path: str) -> None:
 
                 batch.append((norm, display_word or None, phonetic, meaning, sheet, int(row_idx)))
 
-                loading_progress["processed_words"] += 1
-                if display_word and (loading_progress["processed_words"] % SAMPLE_STEP == 0):
-                    lw = loading_progress.get("latest_words", [])
-                    lw.append(display_word)
-                    if len(lw) > LATEST_LIMIT:
-                        del lw[: len(lw) - LATEST_LIMIT]
-                    loading_progress["latest_words"] = lw
+                processed_now = loading_state.increment_processed(
+                    increment=1,
+                    sample_word=display_word,
+                    sample_step=SAMPLE_STEP,
+                    latest_limit=LATEST_LIMIT,
+                )
 
                 # flush in batches
                 if len(batch) >= 10000:
                     cur.executemany(insert_sql, batch)
                     batch.clear()
                     # update percent after a chunk
-                    total = loading_progress.get("total_words", 0) or 0
-                    processed = loading_progress.get("processed_words", 0)
-                    loading_progress["percent"] = (processed / total * 100.0) if total > 0 else 0.0
 
             if batch:
                 cur.executemany(insert_sql, batch)
                 batch.clear()
-                total = loading_progress.get("total_words", 0) or 0
-                processed = loading_progress.get("processed_words", 0)
-                loading_progress["percent"] = (processed / total * 100.0) if total > 0 else 0.0
 
         # index after all inserts
         cur.execute("CREATE INDEX idx_entries_word_norm ON entries(word_norm);")
@@ -213,21 +311,15 @@ def _rebuild_sqlite_from_excel(file_path: str) -> None:
 def _loader_worker(file_path: str):
     global loading_thread, loading_cancelled
     try:
-        loading_progress.update({
-            "running": True,
-            "file": os.path.basename(file_path),
-            "current_sheet": None,
-            "processed_words": 0,
-            "total_words": compute_total_rows(file_path),
-            "percent": 0.0,
-            "error": None,
-        })
+        file_name = os.path.basename(file_path)
+        total_rows = compute_total_rows(file_path)
+        loading_state.reset_for_file(file_name, total_rows)
         loading_cancelled = False
         _rebuild_sqlite_from_excel(file_path)
     except Exception as exc:
-        loading_progress["error"] = str(exc)
+        loading_state.mark_finished(error=str(exc))
     finally:
-        loading_progress["running"] = False
+        loading_state.mark_finished()
         loading_thread = None
 
 
@@ -301,57 +393,64 @@ def api_excel_status():
             con.close()
     except Exception:
         actual_ready = False
-    return jsonify({
+    state = loading_state.snapshot()
+    state.update({
         "loaded": bool(actual_ready),
-        "running": bool(loading_progress.get("running")),
-        "file": loading_progress.get("file"),
         "current_file": current_excel_file,
-        "current_sheet": loading_progress.get("current_sheet"),
-        "processed_words": loading_progress.get("processed_words", 0),
-        "total_words": loading_progress.get("total_words", 0),
-        "percent": loading_progress.get("percent", 0.0),
-        "error": loading_progress.get("error"),
-        "latest_words": loading_progress.get("latest_words", []),
     })
+    return jsonify(state)
 
 
 @app.route("/api/excel/stream")
 def api_excel_stream():
     def generate():
-        last = {
-            "processed": -1,
-            "latest_len": -1,
-            "running": None,
-            "loaded": None,
-            "percent": -1,
-        }
+        try:
+            max_seconds = float(request.args.get("duration", 10.0))
+        except ValueError:
+            max_seconds = 10.0
+        max_seconds = max(1.0, min(max_seconds, 60.0))
+
+        try:
+            interval = float(request.args.get("interval", 0.5))
+        except ValueError:
+            interval = 0.5
+        interval = max(0.1, min(interval, 2.0))
+
+        last_sent: Dict[str, Any] = {}
+        last_emit_ts = 0.0
+        start_time = time.time()
+
         while True:
+            snapshot = loading_state.snapshot()
             state = {
                 "loaded": bool(app.config.get("DATA_LOADED", False)),
-                "running": bool(loading_progress.get("running")),
-                "file": loading_progress.get("file"),
-                "current_sheet": loading_progress.get("current_sheet"),
-                "processed_words": loading_progress.get("processed_words", 0),
-                "total_words": loading_progress.get("total_words", 0),
-                "percent": loading_progress.get("percent", 0.0),
-                "error": loading_progress.get("error"),
-                "latest_words": (loading_progress.get("latest_words", []) or [])[-40:],
+                **snapshot,
             }
-            changed = (
-                state["processed_words"] != last["processed"]
-                or len(state["latest_words"]) != last["latest_len"]
-                or state["running"] != last["running"]
-                or state["loaded"] != last["loaded"]
-                or int(state["percent"]) != int(last["percent"])
-            )
-            if changed:
-                last["processed"] = state["processed_words"]
-                last["latest_len"] = len(state["latest_words"])
-                last["running"] = state["running"]
-                last["loaded"] = state["loaded"]
-                last["percent"] = state["percent"]
+
+            changed = False
+            if not last_sent:
+                changed = True
+            else:
+                if state.get("timestamp") != last_sent.get("timestamp"):
+                    changed = True
+                elif int(state.get("percent", -1)) != int(last_sent.get("percent", -1)):
+                    changed = True
+                elif state.get("running") != last_sent.get("running"):
+                    changed = True
+
+            now = time.time()
+            if changed or (now - last_emit_ts) >= max(2.0, interval * 3):
+                last_sent = state
+                last_emit_ts = now
                 yield f"data: {json.dumps(state, ensure_ascii=False)}\n\n"
-            time.sleep(0.2)
+
+            if now - start_time >= max_seconds:
+                break
+
+            time.sleep(interval)
+
+        closing_payload = {"event": "done", "timestamp": datetime.utcnow().isoformat()}
+        yield f"data: {json.dumps(closing_payload, ensure_ascii=False)}\n\n"
 
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     return Response(stream_with_context(generate()), mimetype="text/event-stream", headers=headers)
@@ -365,7 +464,7 @@ def api_excel_load():
     allowed = {f["name"] for f in files}
     if not file_name or file_name not in allowed:
         return jsonify({"error": "invalid file"}), 400
-    if loading_progress.get("running"):
+    if loading_state.snapshot().get("running"):
         return jsonify({"error": "loading in progress"}), 409
     # reset state
     app.config["DATA_LOADED"] = False
@@ -428,17 +527,12 @@ def api_ai_chat():
         r = requests.post(url, json=payload, headers=headers, timeout=60)
         r.raise_for_status()
         dj = r.json()
-        # extract first choice content safely
         msg = None
         try:
             msg = dj.get("choices", [{}])[0].get("message", {}).get("content", None)
         except Exception:
             msg = None
-        # remove leading newlines often returned by some models
-        if msg is None:
-            cleaned = ""
-        else:
-            cleaned = str(msg).lstrip("\r\n")
+        cleaned = "" if msg is None else str(msg).lstrip("\r\n")
         return jsonify({
             "message": cleaned,
             "raw": dj,
@@ -491,12 +585,11 @@ def api_excel_row():
             "SELECT word, phonetic, meaning FROM entries WHERE sheet = ? AND row_index = ?",
             (sheet, row_index),
         )
-        r = cur.fetchone()
+        result = cur.fetchone()
         con.close()
-        if not r:
+        if not result:
             return jsonify({"error": "not found"}), 404
-        word_text, phonetic, meaning = r
-        # keep frontend compatibility using keys '1','2','3'
+        word_text, phonetic, meaning = result
         row_obj = {
             "1": word_text or "",
             "2": phonetic or "",
@@ -544,7 +637,7 @@ if __name__ == "__main__":
             if auto_excel:
                 auto_excel_path = os.path.join(BASE_DIR, auto_excel)
                 is_main_worker = (os.environ.get("WERKZEUG_RUN_MAIN") == "true") or not bool(os.environ.get("WERKZEUG_RUN_MAIN"))
-                if os.path.exists(auto_excel_path) and is_main_worker and not loading_progress.get("running"):
+                if os.path.exists(auto_excel_path) and is_main_worker and not loading_state.snapshot().get("running"):
                     app.config["DATA_LOADED"] = False
                     try:
                         if os.path.exists(SQLITE_DB_PATH):
@@ -556,6 +649,9 @@ if __name__ == "__main__":
                     t.start()
     except Exception:
         pass
-    app.run(host="0.0.0.0", port=5000, debug=True)
+
+    from waitress import serve
+
+    serve(app, host="0.0.0.0", port=5000)
 
 
