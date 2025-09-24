@@ -3,12 +3,13 @@ import re
 import threading
 import time
 import json
-from collections import OrderedDict
+import sqlite3
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 
 from flask import Flask, jsonify, request, render_template, Response, stream_with_context
 import pandas as pd
+import requests
 
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -22,19 +23,13 @@ BASE_DIR = os.path.abspath(os.getcwd())
 TXT_EXTENSIONS = {".txt"}
 EXCEL_EXTENSIONS = {".xlsx", ".xls"}
 DATA_DIR = os.path.join(BASE_DIR, "data")
+SQLITE_DB_PATH = os.path.join(DATA_DIR, "coca.sqlite")
 
 
 # -----------------------------
-# Excel in-memory store
+# Current selected Excel file
 # -----------------------------
 current_excel_file: Optional[str] = None
-word_index: Dict[str, List[Dict[str, Any]]]= {}
-# Preloaded row store: sheet -> row_index -> { '0': '...', '1': '...', '2': '...', '3': '...' }
-row_store: Dict[str, Dict[int, Dict[str, Optional[str]]]] = {}
-
-# Sheet cache for on-demand row fetching (LRU)
-SHEET_CACHE_CAPACITY = 5
-sheet_cache: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
 
 # Loading state
 loading_thread: Optional[threading.Thread] = None
@@ -76,35 +71,7 @@ def list_excel_files() -> List[Dict[str, Any]]:
     files.sort(key=lambda x: x["name"].lower())
     return files
 
-
-def _sheet_cache_get(sheet: str) -> Optional[pd.DataFrame]:
-    if sheet in sheet_cache:
-        df = sheet_cache.pop(sheet)
-        sheet_cache[sheet] = df
-        return df
-    return None
-
-
-def _sheet_cache_put(sheet: str, df: pd.DataFrame) -> None:
-    sheet_cache[sheet] = df
-    if len(sheet_cache) > SHEET_CACHE_CAPACITY:
-        sheet_cache.popitem(last=False)
-
-
-def get_sheet_df(sheet: str) -> Optional[pd.DataFrame]:
-    global current_excel_file
-    if not current_excel_file:
-        return None
-    df = _sheet_cache_get(sheet)
-    if df is not None:
-        return df
-    try:
-        df = pd.read_excel(current_excel_file, sheet_name=sheet, header=None, dtype=str)
-        df.columns = [str(col) for col in range(df.shape[1])]
-        _sheet_cache_put(sheet, df)
-        return df
-    except Exception:
-        return None
+ 
 
 
 def compute_total_rows(file_path: str) -> int:
@@ -128,74 +95,119 @@ def compute_total_rows(file_path: str) -> int:
             return 0
 
 
-def _build_index_from_file(file_path: str) -> None:
-    global current_excel_file, word_index, sheet_cache, loading_cancelled, row_store
-    word_index.clear()
-    sheet_cache.clear()
-    row_store.clear()
-    loading_progress["latest_words"] = []
+def _rebuild_sqlite_from_excel(file_path: str) -> None:
+    """Rebuild a single SQLite database from the given Excel file.
+    - During rebuild, querying is disabled (handled by caller via flags)
+    - After successful rebuild, mark DATA_LOADED=True
+    Table schema columns: word_norm, word, phonetic, meaning, sheet, row_index
+    """
+    # Prepare excel reader (streaming)
+    from openpyxl import load_workbook
+    wb = load_workbook(filename=file_path, read_only=True, data_only=True)
+    sheets = [ws.title for ws in wb.worksheets]
 
-    # sampling config for recent word preview
-    SAMPLE_STEP = 10  # record every 10th word to reduce overhead
-    LATEST_LIMIT = 40 # keep last 40 items
+    # Create directory for DB if missing
+    os.makedirs(DATA_DIR, exist_ok=True)
 
-    xls = pd.ExcelFile(file_path)
-    sheets = xls.sheet_names
-    for sheet in sheets:
-        if loading_cancelled:
-            return
-        loading_progress["current_sheet"] = sheet
-        try:
-            df = xls.parse(sheet_name=sheet, header=None, dtype=str)
-            num_cols = df.shape[1]
-            word_col_idx = 1 if num_cols > 1 else 0
-            # store limited columns per row (0..3)
-            df.columns = [str(col) for col in range(num_cols)]
-            cols_to_store = [str(i) for i in range(min(4, num_cols))]
-            sheet_rows: Dict[int, Dict[str, Optional[str]]] = {}
-            # iterate words in column
-            for row_idx, value in enumerate(df.iloc[:, word_col_idx].fillna("")):
+    # Create SQLite and write in one transaction
+    con = sqlite3.connect(SQLITE_DB_PATH)
+    cur = con.cursor()
+    try:
+        # Pragmas for faster build
+        cur.execute("PRAGMA journal_mode=WAL;")
+        cur.execute("PRAGMA synchronous=NORMAL;")
+        cur.execute("PRAGMA temp_store=MEMORY;")
+
+        cur.execute("DROP TABLE IF EXISTS entries;")
+        cur.execute(
+            """
+            CREATE TABLE entries (
+              id INTEGER PRIMARY KEY,
+              word_norm TEXT NOT NULL,
+              word TEXT,
+              phonetic TEXT,
+              meaning TEXT,
+              sheet TEXT,
+              row_index INTEGER
+            );
+            """
+        )
+
+        con.execute("BEGIN;")
+
+        # Sampling config for preview
+        SAMPLE_STEP = 10
+        LATEST_LIMIT = 40
+        loading_progress["latest_words"] = []
+
+        insert_sql = (
+            "INSERT INTO entries (word_norm, word, phonetic, meaning, sheet, row_index) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+
+        # We reuse total_words computed by caller; processed_words is reset in caller
+        for sheet in sheets:
+            loading_progress["current_sheet"] = sheet
+            ws = wb[sheet]
+            # choose word column index based on worksheet column count
+            max_cols = ws.max_column or 1
+            word_col_idx = 1 if max_cols > 1 else 0
+            # iterate and batch insert
+            batch: List[Tuple[str, Optional[str], Optional[str], Optional[str], str, int]] = []
+            for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
                 if loading_cancelled:
-                    return
-                display_word = str(value).strip()
-                norm = normalize_word(value)
+                    con.rollback()
+                    raise RuntimeError("loading cancelled")
+                # guard for row tuple shorter than expected
+                word_raw = row[word_col_idx] if word_col_idx < len(row or ()) else None
+                display_word = "" if word_raw is None else str(word_raw).strip()
+                norm = normalize_word(display_word)
+                # map optional columns 2 and 3 when present
+                phonetic_val = row[2] if (row and len(row) > 2) else None
+                meaning_val = row[3] if (row and len(row) > 3) else None
+                phonetic = None if phonetic_val is None else str(phonetic_val)
+                meaning = None if meaning_val is None else str(meaning_val)
+
+                batch.append((norm, display_word or None, phonetic, meaning, sheet, int(row_idx)))
+
                 loading_progress["processed_words"] += 1
-                # sample recent words
-                if loading_progress["processed_words"] % SAMPLE_STEP == 0 and display_word:
+                if display_word and (loading_progress["processed_words"] % SAMPLE_STEP == 0):
                     lw = loading_progress.get("latest_words", [])
                     lw.append(display_word)
                     if len(lw) > LATEST_LIMIT:
                         del lw[: len(lw) - LATEST_LIMIT]
                     loading_progress["latest_words"] = lw
-                if not norm:
-                    # still store row data even if no index word
-                    pass
-                else:
-                    word_index.setdefault(norm, []).append({
-                        "sheet": sheet,
-                        "row_index": int(row_idx),
-                    })
-                # build minimal row data
-                row_series = df.iloc[row_idx]
-                row_dict: Dict[str, Optional[str]] = {}
-                for c in cols_to_store:
-                    val = row_series.get(c, None)
-                    if pd.isna(val):
-                        row_dict[c] = None
-                    else:
-                        row_dict[c] = str(val)
-                sheet_rows[int(row_idx)] = row_dict
-            row_store[sheet] = sheet_rows
-            # optionally cache small sheets
-        except Exception as exc:
-            loading_progress["error"] = f"sheet '{sheet}' failed: {exc}"
-        # update percent after each sheet
-        total = loading_progress.get("total_words", 0) or 0
-        processed = loading_progress.get("processed_words", 0)
-        loading_progress["percent"] = (processed / total * 100.0) if total > 0 else 0.0
 
-    current_excel_file = file_path
-    app.config["DATA_LOADED"] = True
+                # flush in batches
+                if len(batch) >= 10000:
+                    cur.executemany(insert_sql, batch)
+                    batch.clear()
+                    # update percent after a chunk
+                    total = loading_progress.get("total_words", 0) or 0
+                    processed = loading_progress.get("processed_words", 0)
+                    loading_progress["percent"] = (processed / total * 100.0) if total > 0 else 0.0
+
+            if batch:
+                cur.executemany(insert_sql, batch)
+                batch.clear()
+                total = loading_progress.get("total_words", 0) or 0
+                processed = loading_progress.get("processed_words", 0)
+                loading_progress["percent"] = (processed / total * 100.0) if total > 0 else 0.0
+
+        # index after all inserts
+        cur.execute("CREATE INDEX idx_entries_word_norm ON entries(word_norm);")
+        # speed up row lookup by (sheet,row_index)
+        cur.execute("CREATE INDEX idx_entries_sheet_row ON entries(sheet, row_index);")
+
+        con.commit()
+
+        # mark loaded
+        app.config["DATA_LOADED"] = True
+        global current_excel_file
+        current_excel_file = file_path
+    finally:
+        con.close()
+
+ 
 
 
 def _loader_worker(file_path: str):
@@ -211,7 +223,7 @@ def _loader_worker(file_path: str):
             "error": None,
         })
         loading_cancelled = False
-        _build_index_from_file(file_path)
+        _rebuild_sqlite_from_excel(file_path)
     except Exception as exc:
         loading_progress["error"] = str(exc)
     finally:
@@ -346,9 +358,13 @@ def api_excel_load():
     # reset state
     app.config["DATA_LOADED"] = False
     current_excel_file = None
-    word_index.clear()
-    sheet_cache.clear()
-    row_store.clear()
+    # remove existing sqlite db if any (fresh rebuild as requested)
+    try:
+        if os.path.exists(SQLITE_DB_PATH):
+            os.remove(SQLITE_DB_PATH)
+    except Exception:
+        pass
+    # clear legacy in-memory structures (no longer used)
     # start thread
     file_path = os.path.join(BASE_DIR, file_name)
     t = threading.Thread(target=_loader_worker, args=(file_path,), daemon=True)
@@ -362,28 +378,93 @@ def api_excel_unload():
     global current_excel_file
     app.config["DATA_LOADED"] = False
     current_excel_file = None
-    word_index.clear()
-    sheet_cache.clear()
-    row_store.clear()
+    # clear legacy in-memory structures (no longer used)
+    # delete sqlite db file as well
+    try:
+        if os.path.exists(SQLITE_DB_PATH):
+            os.remove(SQLITE_DB_PATH)
+    except Exception:
+        pass
     return jsonify({"ok": True})
 
+
+@app.route("/api/ai/chat", methods=["POST"])
+def api_ai_chat():
+    try:
+        data = request.get_json(silent=True) or {}
+        api_key = (data.get("api_key") or "").strip()
+        content = (data.get("content") or "").strip()
+        model = (data.get("model") or "Qwen/QwQ-32B").strip()
+        system = (data.get("system") or "").strip()
+        if not api_key:
+            return jsonify({"error": "missing api_key"}), 400
+        if not content:
+            return jsonify({"error": "missing content"}), 400
+        url = "https://api.siliconflow.cn/v1/chat/completions"
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": content})
+        payload = {
+            "model": model,
+            "messages": messages,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        r.raise_for_status()
+        dj = r.json()
+        # extract first choice content safely
+        msg = None
+        try:
+            msg = dj.get("choices", [{}])[0].get("message", {}).get("content", None)
+        except Exception:
+            msg = None
+        # remove leading newlines often returned by some models
+        if msg is None:
+            cleaned = ""
+        else:
+            cleaned = str(msg).lstrip("\r\n")
+        return jsonify({
+            "message": cleaned,
+            "raw": dj,
+        })
+    except requests.HTTPError as http_err:
+        return jsonify({"error": f"http {http_err.response.status_code}", "detail": http_err.response.text}), 502
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 @app.route("/api/excel/search")
 def api_excel_search():
     if not app.config.get("DATA_LOADED", False):
-        return jsonify({"error": "excel not loaded"}), 400
+        return jsonify({"error": "loading or db not ready"}), 400
     word = request.args.get("word", "").strip()
     if not word:
         return jsonify({"error": "missing word"}), 400
     norm = normalize_word(word)
-    matches = word_index.get(norm, [])
-    return jsonify({"word": word, "normalized": norm, "count": len(matches), "matches": matches})
+    try:
+        con = sqlite3.connect(SQLITE_DB_PATH)
+        cur = con.cursor()
+        cur.execute(
+            "SELECT sheet, row_index FROM entries WHERE word_norm = ? LIMIT 1",
+            (norm,),
+        )
+        rows = cur.fetchall()
+        matches: List[Dict[str, Any]] = []
+        for s, r in rows:
+            matches.append({"sheet": s, "row_index": int(r) if r is not None else 0})
+        con.close()
+        return jsonify({"word": word, "normalized": norm, "count": len(matches), "matches": matches})
+    except Exception as exc:
+        return jsonify({"error": f"db error: {exc}"}), 500
 
 
 @app.route("/api/excel/row")
 def api_excel_row():
     if not app.config.get("DATA_LOADED", False):
-        return jsonify({"error": "excel not loaded"}), 400
+        return jsonify({"error": "loading or db not ready"}), 400
     sheet = request.args.get("sheet", "").strip()
     try:
         row_index = int(request.args.get("row_index", "-1"))
@@ -391,15 +472,31 @@ def api_excel_row():
         row_index = -1
     if not sheet or row_index < 0:
         return jsonify({"error": "missing sheet or row_index"}), 400
-    sheet_rows = row_store.get(sheet)
-    if not sheet_rows or row_index not in sheet_rows:
-        return jsonify({"error": "not found"}), 404
-    row = sheet_rows[row_index]
-    return jsonify({
-        "sheet": sheet,
-        "row_index": row_index,
-        "row": row
-    })
+    try:
+        con = sqlite3.connect(SQLITE_DB_PATH)
+        cur = con.cursor()
+        cur.execute(
+            "SELECT word, phonetic, meaning FROM entries WHERE sheet = ? AND row_index = ?",
+            (sheet, row_index),
+        )
+        r = cur.fetchone()
+        con.close()
+        if not r:
+            return jsonify({"error": "not found"}), 404
+        word_text, phonetic, meaning = r
+        # keep frontend compatibility using keys '1','2','3'
+        row_obj = {
+            "1": word_text or "",
+            "2": phonetic or "",
+            "3": meaning or "",
+        }
+        return jsonify({
+            "sheet": sheet,
+            "row_index": row_index,
+            "row": row_obj,
+        })
+    except Exception as exc:
+        return jsonify({"error": f"db error: {exc}"}), 500
 
 
 # No auto-loading. Data is loaded via /api/excel/load
@@ -407,6 +504,18 @@ pass
 
 
 if __name__ == "__main__":
+    # Auto-detect existing SQLite database on startup
+    try:
+        if os.path.exists(SQLITE_DB_PATH):
+            con = sqlite3.connect(SQLITE_DB_PATH)
+            cur = con.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='entries'")
+            exists = cur.fetchone() is not None
+            con.close()
+            if exists:
+                app.config["DATA_LOADED"] = True
+    except Exception:
+        pass
     app.run(host="0.0.0.0", port=5000, debug=True)
 
 
