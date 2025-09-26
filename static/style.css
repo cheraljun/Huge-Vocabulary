@@ -142,15 +142,70 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 .bottom-nav .tab[aria-selected="true"]{ color: var(--blue); font-weight: 600; }
 
 /* Toast */
-.toast-container{ position: fixed; left: 50%; bottom: 80px; transform: translateX(-50%); background: rgba(0,0,0,0.78); color: #fff; padding: 8px 12px; border-radius: 999px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .15s; }
-.toast-container.show{ opacity: 1; }
+.toast-container{ 
+  position: fixed; 
+  left: 50%; 
+  bottom: 80px; 
+  transform: translateX(-50%); 
+  background: rgba(27, 42, 65, 0.85); 
+  color: #fff; 
+  padding: 10px 16px; 
+  border-radius: 8px;
+  font-size: 14px; 
+  opacity: 0; 
+  pointer-events: none; 
+  transition: opacity .2s, transform .2s; 
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 9999;
+  text-align: center;
+  max-width: 80%;
+}
+.toast-container.show{ 
+  opacity: 1; 
+  transform: translateX(-50%) translateY(-10px);
+}
+
+.announcement-bar {
+  background: #cce5ff;
+  color: #004085;
+  text-align: center;
+  padding: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 16px;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.announcement-bar span {
+  display: inline-block;
+  padding-left: 100%;
+  animation: marquee 15s linear infinite;
+}
+
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+
+/* 特殊样式：欢迎页面中的公告栏 */
+.guide-announcement {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  width: min(90%, 600px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
 
 .guide{ position: fixed; inset: 0; background: rgba(231, 235, 240, 0.96); display: flex; align-items: center; justify-content: center; padding: 32px 16px; z-index: 20; backdrop-filter: blur(2px); overflow: auto; }
 .guide[hidden]{ display: none; }
-.guide-content{ max-width: 720px; width: min(100%, 640px); background: #fff; border-radius: 20px; box-shadow: 0 20px 40px rgba(18, 35, 60, 0.12); padding: 32px; display: grid; gap: 16px; color: var(--text); margin: auto; word-break: break-word; overflow-wrap: anywhere; }
-.guide-content h1{ margin: 0; font-size: 24px; font-weight: 700; }
-.guide-content p{ margin: 0; line-height: 1.8; }
-.guide-content ul{ margin: 0; padding-left: 20px; display: grid; gap: 10px; line-height: 1.7; }
+.guide-content{ max-width: 720px; width: min(100%, 640px); background: #fff; border-radius: 16px; box-shadow: 0 10px 20px rgba(18, 35, 60, 0.08); padding: 24px; display: grid; gap: 14px; color: var(--text); margin: auto; word-break: break-word; overflow-wrap: anywhere; }
+.guide-content h1{ margin: 0 0 8px 0; font-size: 22px; font-weight: 700; }
+.guide-content p{ margin: 0 0 8px 0; line-height: 1.6; }
+.guide-content ul{ margin: 0 0 8px 0; padding-left: 20px; display: grid; gap: 8px; line-height: 1.5; }
 .guide-content li strong{ font-weight: 600; }
 .guide-note{ font-size: 14px; color: var(--muted); }
 .guide-qrcode{ width: 180px; max-width: 60%; justify-self: center; border-radius: 12px; box-shadow: 0 10px 20px rgba(18, 35, 60, 0.08); }

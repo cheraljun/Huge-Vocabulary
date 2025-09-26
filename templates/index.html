@@ -10,18 +10,31 @@
     <div class="app app-single">
       <main class="main">
         <section id="guide" class="guide" aria-labelledby="guideTitle">
+          <!-- 公告栏放在欢迎页面内部，这样当欢迎页面隐藏时，公告栏也会一起隐藏 -->
+          <div class="announcement-bar guide-announcement">
+            <span>公益项目 请勿攻击本站！欢迎加入交流群一起维护此项目</span>
+          </div>
+          
           <div class="guide-content">
             <h1 id="guideTitle">欢迎使用连词成句</h1>
-            <p>公益项目，请不要攻打ip地址。这是一个帮你通过情境句记忆单词、还能跟 AI 聊天的轻量应用。先来快速熟悉四个主要区域吧：</p>
+            <p><strong>项目灵感</strong><br>
+            该项目灵感源于大语言模型(LLM)的特殊能力：将不相关词汇自然融合到连贯故事中。LLM能"天马行空"地创造情境，将美国当代英语语料库（COCA）使用频率最高的前20,000个单词单词整合成生动有趣的句子，符合人类大脑的记忆规律——故事化、情境化的内容更容易被记住。项目中的每个情境句都是这种能力的体现，让学习者在阅读故事的同时，记住大量词汇。</p>
+            
+            <p>2个月内词汇量达到英语母语水平。无需再单独记忆<strong>四六级、考研、雅思托福、SAT、GMAT、TOEFL、GRE单词</strong>，读通200条情境句，彻底解决词汇量问题。</p>
+            
+            <p><strong>功能介绍：</strong></p>
             <ul>
-              <li><strong>数据库：</strong>美国当代英语语料库（Corpus of Contemporary American English），简称 COCA。由美国杨伯翰大学的 Mark Davies 教授在 2008 年创立，是目前最大的在线免费英语语料库，帮助你了解单词、短语以及句子结构的真实使用频率。COCA 涵盖口语、小说、杂志、报纸、期刊五大体裁（各约 8~9 千万词），特点就是大、全、新。我们从中挑出前 20,000 个高频词，按每 100 词分组，并为每组配上一条完整情境句，让你飞速积累词汇。</li>
-              <li><strong>情境句：</strong>按分段阅读示例句，点击单词可直接跳转到查词。</li>
-              <li><strong>查词：</strong>查看单词的原始行、音标与释义，方便对照学习。</li>
-              <li><strong>AI 对话：</strong>右上角填好硅基流动得 API Key 和想要的提示词，挑个模型，就能和 AI 边聊边学。</li>
+              <li><strong>数据库：</strong>美国当代英语语料库（COCA）覆盖超过10亿词汇，从中筛选出使用频率最高的前20,000个单词，每100词配一条情境句。目前已收录100句（包括10000词），持续更新中。</li>
+              <li><strong>情境句：</strong>按分段阅读示例句，点击单词可跳转查词。由于浏览器限制可能复制失效，请手动选择文本。</li>
+              <li><strong>查词：</strong>查看单词音标与释义，方便学习。</li>
+              <li><strong>AI对话：</strong>填入<a href="https://siliconflow.cn/" target="_blank">硅基流动</a>的API Key，用于辅助翻译，或填入自定义提示词另作他用。</li>
             </ul>
-            <p class="guide-note">复制全文的功能因浏览器限制可能失效，可以手动进行复制。记单词交流群</p>
-            <img src="/static/群.png" alt="记单词交流群二维码" class="guide-qrcode" />
-            <p class="guide-note">有想法或建议吗？加作者微信聊聊：<strong>yes_smile_peace</strong></p>
+            
+            <p>有想法或建议？欢迎加入项目维护：</p>
+            <p>- GitHub项目地址：<a href="https://github.com/cheraljun/Huge-Vocabulary" target="_blank">https://github.com/cheraljun/Huge-Vocabulary</a></p>
+            <p>- QQ交流群：<strong>1014873476</strong></p>
+            <p>- 联系作者微信：<strong>yes_smile_peace</strong></p>
+            
             <button id="guideClose" class="guide-close" type="button">了解了，开始体验</button>
           </div>
         </section>
@@ -37,7 +50,7 @@
         <!-- 数据库视图 -->
         <div id="view-database" class="view" aria-label="词库视图">
           <div class="section">
-            <div class="section-title">请选择一个情景句载入学习吧！</div>
+            <div class="section-title">选择情境句载入</div>
             <div id="txtList" class="list"></div>
           </div>
           <div class="section">
@@ -66,7 +79,7 @@
                 <input id="aiSystem" type="text" placeholder="系统提示词（可选）" />
                 <div class="ai-key-field">
                   <label class="sr-only" for="aiKey">API Key</label>
-                  <input id="aiKey" type="password" placeholder="API Key" autocomplete="off" />
+                  <input id="aiKey" type="password" placeholder="硅基流动 API Key" autocomplete="off" />
                   <button type="button" id="aiKeyToggle" class="btn-icon" aria-label="切换 API Key 可见性">显示</button>
                 </div>
               </div>
@@ -92,5 +105,3 @@
     <script type="module" src="/static/js/main.js"></script>
   </body>
 </html>
-
-

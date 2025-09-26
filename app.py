@@ -649,10 +649,18 @@ if __name__ == "__main__":
                     t.start()
     except Exception:
         pass
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
-    # from waitress import serve
+# if __name__ == "__main__":
+#     app.run(host="0.0.0.0", port=5000)
+    from waitress import serve
 
-    # serve(app, host="0.0.0.0", port=5000)
+    # 根据服务器配置(2vCPU/2GB内存)优化并发处理能力
+    serve(
+        app, 
+        host="0.0.0.0", 
+        port=5000,
+        threads=10,             # 适合2核CPU的线程数
+        connection_limit=500,   # 适合2GB内存的连接数
+        channel_timeout=120     # 连接超时时间(秒)
+    )
 
 

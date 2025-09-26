@@ -113,16 +113,15 @@ export async function loadTxtList() {
           const data = await fetchJSON(`/api/txt/content?name=${encodeURIComponent(name)}`);
           const text = (data.content || '').trim();
           const baseName = String(name).replace(/\.[^.]+$/, '');
-          const confirmed = window.confirm(`您已选择：${baseName}\n学习愉快！`);
-          if (confirmed) {
-            renderSentenceCenter(text);
-            if (activeTile && activeTile !== tile) {
-              activeTile.classList.remove('active');
-            }
-            tile.classList.add('active');
-            activeTile = tile;
-            setActiveView('segments');
+          // 移除确认窗口，改用Toast通知
+          renderSentenceCenter(text);
+          if (activeTile && activeTile !== tile) {
+            activeTile.classList.remove('active');
           }
+          tile.classList.add('active');
+          activeTile = tile;
+          setActiveView('segments');
+          showToast(`已加载：${baseName}，学习愉快！`, 2000);
         } catch {
           showToast('加载失败');
         }
