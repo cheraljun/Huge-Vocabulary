@@ -67,12 +67,9 @@ online_sessions: Dict[str, float] = {}
 
 
 def get_site_online_count() -> int:
-    now = time.time()
-    with online_sessions_lock:
-        expired = [sid for sid, ts in list(online_sessions.items()) if now - ts > ONLINE_SESSION_TIMEOUT]
-        for sid in expired:
-            online_sessions.pop(sid, None)
-        return len(online_sessions)
+    # 统一以聊天室在线用户为准
+    _update_online_status()
+    return len(online_users)
 
 
 # 仅保留内存在线会话，无持久化
@@ -185,7 +182,8 @@ def _update_online_status() -> None:
     now = time.time()
     timeout_keys: List[str] = []
     for uk, info in list(online_users.items()):
-        if now - info.get("last_active", 0) > 900:
+        # 使用统一会话超时时间
+        if now - info.get("last_active", 0) > ONLINE_SESSION_TIMEOUT:
             timeout_keys.append(uk)
     for uk in timeout_keys:
         username = online_users.get(uk, {}).get("name", "")
@@ -233,10 +231,10 @@ def add_message(message_obj: Dict[str, Any]) -> int:
         cur = con.cursor()
         cur.execute("INSERT INTO chat_messages(content) VALUES(?)", (content,))
         con.commit()
-        # cap to latest 10000
+        # cap to latest 1000
         cur.execute("SELECT COUNT(*) FROM chat_messages")
         (cnt,) = cur.fetchone()
-        surplus = int(cnt or 0) - 10000
+        surplus = int(cnt or 0) - 1000
         if surplus > 0:
             cur.execute(
                 "DELETE FROM chat_messages WHERE id IN (SELECT id FROM chat_messages ORDER BY id ASC LIMIT ?)",
@@ -648,7 +646,7 @@ def api_excel_status():
 
 @app.route("/api/chat/online_count")
 def api_online_count():
-    # 返回当前在线人数
+    # 返回站点在线会话人数（用于首页展示，不要求已登录聊天室）
     now = time.time()
     with online_sessions_lock:
         expired = [sid for sid, ts in list(online_sessions.items()) if now - ts > ONLINE_SESSION_TIMEOUT]
@@ -1013,18 +1011,17 @@ def chat_upload():
 
 @app.route("/msg", methods=["GET"])
 def chat_get_messages():
-    last_index = int(request.args.get('k', 0))
+    # 始终返回最新的100条消息（从末尾往前），忽略客户端 last_index
+    last_index = int(request.args.get('k', 0))  # 兼容参数，不用于筛选
     client_version = int(request.args.get('v', 0))
     server_version = _get_current_version()
     _update_online_status()
     if client_version != server_version:
         return jsonify({'reset': True, 'version': server_version})
     total = chat_total_messages()
-    if last_index >= total:
-        return jsonify({'count': total, 'list': [], 'version': server_version})
-    start_index = max(0, total - 1000)
-    start_index = max(start_index, last_index)
-    limit = min(1000, total - start_index)
+    # 仅返回最后100条
+    start_index = max(0, total - 100)
+    limit = min(100, total - start_index)
     raw_list = chat_fetch_messages(start_index, limit)
     users = set()
     for s in raw_list:

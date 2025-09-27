@@ -9,6 +9,12 @@ var isSending = false; // 发送状态锁
 var chatUsers = []; // 全局用户列表
 var userColors = {}; // 用户颜色缓存
 var heartbeatInterval = 60000; // 心跳间隔60秒
+var isFetchingMessages = false; // 防止并发拉取导致重复
+var pollingTimerLastInterval = 2000; // 上次定时器间隔
+var pollingTimerLastResetTs = 0; // 上次重建定时器时间戳
+var lastRenderSignature = null; // 上次渲染签名，避免重复重绘导致闪烁
+var pendingSelfScroll = false; // 自己发送后，下一次拉取强制滚动到底
+var lastMsgSignature = null; // 上一次渲染的最后一条原始消息，用于增量判断
 
 // 私聊系统状态
 var currentView = 'group'; // 'group', 'private-dropdown', 'private-chat'
@@ -56,10 +62,15 @@ function adjustPollingInterval(hasNewMessages) {
         }
     }
     
-    // 重启轮询定时器
+    // 节流重建定时器：间隔变化显著且距离上次重建超过1.5s才重建
     if (c) {
-        clearInterval(c);
-        c = setInterval(get_msg, pollingConfig.currentInterval);
+        var diff = Math.abs(pollingConfig.currentInterval - pollingTimerLastInterval);
+        if (diff >= 300 && (now - pollingTimerLastResetTs) > 1500) {
+            clearInterval(c);
+            c = setInterval(get_msg, pollingConfig.currentInterval);
+            pollingTimerLastInterval = pollingConfig.currentInterval;
+            pollingTimerLastResetTs = now;
+        }
     }
 }
 
@@ -121,14 +132,7 @@ $(document).ready(function() {
 
     
 
-    // 显示/隐藏管理员密码框
-    $("#nick").on("input", function() {
-        if ($(this).val() === 'admin') {
-            $("#pwd").show();
-        } else {
-            $("#pwd").hide();
-        }
-    });
+    // 已移除管理员密码相关逻辑
     
     // 监听用户活动
     $(document).on('click keypress scroll', function() {
@@ -186,12 +190,7 @@ $(document).ready(function() {
         currentView = 'group';
     });
     
-    // 点击其他地方隐藏头像菜单
-    $(document).on('click', function(e) {
-        if (!$(e.target).closest('#avatar-menu').length && !$(e.target).hasClass('avatar')) {
-            $('#avatar-menu').hide();
-        }
-    });
+    // 点击其他地方隐藏头像菜单（统一在文末的全局绑定处处理，避免重复绑定）
     
     // 页面关闭事件监听
     window.addEventListener('beforeunload', function() {
@@ -203,7 +202,15 @@ $(document).ready(function() {
 
 function sockll() {
     var chatBox = $("#chat-box")[0];
+    if (!chatBox) return;
     chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+function isAtBottom() {
+    var el = document.getElementById('chat-box');
+    if (!el) return true;
+    var threshold = 8; // px
+    return (el.scrollHeight - (el.scrollTop + el.clientHeight)) <= threshold;
 }
 
 // 发送心跳
@@ -249,6 +256,7 @@ function send() {
         
         $("#msg").val("");
         $("#msg").focus();
+        pendingSelfScroll = true; // 自己发完下一轮强制滚动
         resetChatInputHeight();
     }, "json").fail(function() {
         isSending = false;
@@ -610,7 +618,7 @@ function generateFileHtml(fileInfo) {
     if (fileType === 'image') {
         // 图片直接显示预览
         return '<div class="file-message">' +
-               '<img src="/uploads/' + fileInfo.filename + '" alt="' + fileInfo.name + '" class="image-preview">' +
+               '<img src="/uploads/' + fileInfo.filename + '" alt="' + fileInfo.name + '" class="image-preview" loading="lazy">' +
                '<div class="file-info" style="margin-top: 5px;">' +
                '<div class="file-name">' + fileInfo.name + '</div>' +
                '<div class="file-size">' + formatFileSize(fileInfo.size) + '</div>' +
@@ -661,7 +669,11 @@ $(document).on('click', '#image-modal', function(e) {
 // 私聊邀请与列表逻辑已移除
 
 function get_msg() {
-    // 仅群聊逻辑
+    // 仅群聊逻辑，防抖：防止并发请求导致重复消息
+    if (isFetchingMessages) {
+        return;
+    }
+    isFetchingMessages = true;
     
     $.getJSON("/msg?k=" + k + "&v=" + version, function(data) {
         if (data.reset) {
@@ -682,7 +694,7 @@ function get_msg() {
                 adminClearInProgress = false;
             }, 1000);
             
-            get_msg();
+            // 不在此处递归调用，交给定时器下次轮询
             return;
         }
         
@@ -691,33 +703,96 @@ function get_msg() {
         }
         
         if (data.list && data.list.length > 0) {
-            k = data.count;
-            
-            // 群聊模式下正常显示消息
-            $.each(data.list, function(index, msgJson) {
-                try {
-                    var msg = JSON.parse(msgJson);
-                    if (msg.type === 'sys') {
-                        addtip(msg.msg, 'tips-warning');
-                    } else if (msg.type === 'file') {
-                        // 处理文件消息
-                        var isSelf = (msg.key === key);
-                        var position = isSelf ? "right" : "left";
-                        var timestamp = msg.timestamp ? msg.timestamp : "";
-                        var fileHtml = generateFileHtml(msg.fileInfo);
-                        addmsg(msg.name, fileHtml, position, isSelf, timestamp, 'file');
-                    } else {
-                        // 处理普通文本消息
-                        var isSelf = (msg.key === key);
-                        var position = isSelf ? "right" : "left";
-                        var timestamp = msg.timestamp ? msg.timestamp : "";
-                        addmsg(msg.name, msg.msg, position, isSelf, timestamp, 'text');
-                    }
-                } catch (e) {
-                    console.error("Error parsing message:", e);
+            var currentCount = k || 0;
+            var newTotal = data.count || data.list.length;
+            var delta = newTotal - currentCount;
+            var $box = $('#chat-box');
+
+            // 如果最后一条消息未变化，则直接跳过渲染，避免重复闪烁
+            var incomingLastRaw = data.list[data.list.length - 1] || '';
+            if (lastMsgSignature && incomingLastRaw === lastMsgSignature && delta <= 0) {
+                // 无新增且尾部一致，不刷新
+                return;
+            }
+
+            // 情况1：版本回滚/清空（总数变小）或无已渲染内容 → 全量重绘
+            if (delta <= 0 || $box.children().length === 0) {
+                var fullHtml = [];
+                $.each(data.list, function(index, msgJson) {
+                    try {
+                        var msg = JSON.parse(msgJson);
+                        if (msg.type === 'sys') {
+                            fullHtml.push('<div class="tips tips-warning">' + msg.msg + '</div>');
+                        } else {
+                            var isSelf = (msg.key === key);
+                            var position = isSelf ? "right" : "left";
+                            var timestamp = msg.timestamp ? msg.timestamp : "";
+                            var contentHtml = (msg.type === 'file') ? generateFileHtml(msg.fileInfo) : convertLinksToHtml(msg.msg);
+                            if (!userColors[msg.name]) userColors[msg.name] = getRandomLightColor();
+                            var avatarColor = userColors[msg.name];
+                            var firstChar = msg.name.charAt(0).toUpperCase();
+                            var timestampHtml = timestamp ? '<div class="timestamp">' + timestamp + '</div>' : '';
+                            var selfClass = isSelf ? ' self-msg' : '';
+                            fullHtml.push('<div class="msg ' + position + selfClass + '">\
+<div class="msg-content">\
+<div class="avatar" style="background-color:' + avatarColor + '">' + firstChar + '</div>\
+<div class="msg-body">\
+<div class="username">' + msg.name + '</div>\
+<div class="message">' + contentHtml + '</div>' + timestampHtml + '\
+</div>\
+</div>\
+</div>');
+                        }
+                    } catch (e) { console.error("Error parsing message:", e); }
+                });
+                var shouldStickBottom = pendingSelfScroll || isAtBottom();
+                $box.empty().append(fullHtml.join(''));
+                if (shouldStickBottom) sockll();
+                pendingSelfScroll = false;
+            } else {
+                // 情况2：有新增消息，且新增数量小于100 → 仅追加尾部delta条
+                var toAppend = Math.min(delta, data.list.length);
+                var startIndex = Math.max(0, data.list.length - toAppend);
+                var appendHtml = [];
+                for (var i = startIndex; i < data.list.length; i++) {
+                    try {
+                        var aMsg = JSON.parse(data.list[i]);
+                        if (aMsg.type === 'sys') {
+                            appendHtml.push('<div class="tips tips-warning">' + aMsg.msg + '</div>');
+                        } else {
+                            var aSelf = (aMsg.key === key);
+                            var aPos = aSelf ? "right" : "left";
+                            var aTs = aMsg.timestamp ? aMsg.timestamp : "";
+                            var aContent = (aMsg.type === 'file') ? generateFileHtml(aMsg.fileInfo) : convertLinksToHtml(aMsg.msg);
+                            if (!userColors[aMsg.name]) userColors[aMsg.name] = getRandomLightColor();
+                            var aColor = userColors[aMsg.name];
+                            var aFirst = aMsg.name.charAt(0).toUpperCase();
+                            var aTsHtml = aTs ? '<div class="timestamp">' + aTs + '</div>' : '';
+                            var aSelfClass = aSelf ? ' self-msg' : '';
+                            appendHtml.push('<div class="msg ' + aPos + aSelfClass + '">\
+<div class="msg-content">\
+<div class="avatar" style="background-color:' + aColor + '">' + aFirst + '</div>\
+<div class="msg-body">\
+<div class="username">' + aMsg.name + '</div>\
+<div class="message">' + aContent + '</div>' + aTsHtml + '\
+</div>\
+</div>\
+</div>');
+                        }
+                    } catch (e) { console.error("Error parsing message:", e); }
                 }
-            });
-            sockll();
+                if (appendHtml.length) {
+                    var shouldStick = pendingSelfScroll || isAtBottom();
+                    $box.append(appendHtml.join(''));
+                    if (shouldStick) sockll();
+                    pendingSelfScroll = false;
+                }
+                // 保持最多100条（包含tips和msg）
+                trimChatBoxTo(100);
+            }
+            // 记录最后一条签名与总数
+            lastMsgSignature = incomingLastRaw;
+            k = newTotal;
         }
         
         if (data.users) {
@@ -738,16 +813,41 @@ function get_msg() {
             errorMsg = '服务器错误';
         }
         
-        addtip(errorMsg + '，<a id="fresh" href="javascript:;">点击重试</a>', 'tips-warning');
-        $('#fresh').on('click', function() {
-            // 重置轮询配置
+        // 移除已有的重试按钮，防止重复
+        $('#chat-box .fresh-retry').closest('.tips').remove();
+        addtip(errorMsg + '，<a class="fresh-retry" href="javascript:;">点击重试</a>', 'tips-warning');
+        // 使用事件委托并去重绑定
+        $(document).off('click.fresh', '.fresh-retry').on('click.fresh', '.fresh-retry', function() {
             pollingConfig.currentInterval = 2000;
             pollingConfig.consecutiveEmptyResponses = 0;
-            
             get_msg();
-            c = setInterval(get_msg, pollingConfig.currentInterval);
+            if (!c) {
+                c = setInterval(get_msg, pollingConfig.currentInterval);
+            }
         });
+    }).always(function() {
+        // 标记请求结束，允许下次拉取
+        isFetchingMessages = false;
     });
+}
+
+// 限制聊天列表DOM数量，避免长时间运行卡顿
+function trimChatBox(maxNodes) {
+    var $box = $('#chat-box');
+    var $nodes = $box.children('.msg, .tips');
+    var excess = $nodes.length - maxNodes;
+    if (excess > 0) {
+        $nodes.slice(0, excess).remove();
+    }
+}
+
+// 精确裁剪为最多N条
+function trimChatBoxTo(maxNodes) {
+    var $box = $('#chat-box');
+    var $nodes = $box.children('.msg, .tips');
+    if ($nodes.length > maxNodes) {
+        $nodes.slice(0, $nodes.length - maxNodes).remove();
+    }
 }
 
 // 处理服务器要求的强制刷新（仅在管理员清屏等特殊情况下调用）
