@@ -21,7 +21,7 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 BASE_DIR = os.path.abspath(os.getcwd())
 TXT_EXTENSIONS = {".txt"}
 EXCEL_EXTENSIONS = {".xlsx", ".xls"}
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.path.join(BASE_DIR, "data_sentence")
 SQLITE_DB_PATH = os.path.join(DATA_DIR, "coca.sqlite")
 STATE_FILE_PATH = os.path.join(DATA_DIR, "loading_state.json")
 
