@@ -32,6 +32,8 @@ DATA_CHAT_DIR = os.path.join(BASE_DIR, "data_chat")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 CHAT_SQLITE_PATH = os.path.join(DATA_CHAT_DIR, "chat.sqlite")
 COOKIE_NAME_PREFIX = "chat_"
+ONLINE_SESSION_TIMEOUT = 300  # seconds
+SITE_SESSION_COOKIE = "site_session_id"
 
 os.makedirs(DATA_CHAT_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -58,6 +60,23 @@ file_locks = {
 message_cache: Dict[str, Any] = {
     "version": 0,
 }
+
+# 简化：仅内存维护站点在线会话
+online_sessions_lock = threading.Lock()
+online_sessions: Dict[str, float] = {}
+
+
+def get_site_online_count() -> int:
+    now = time.time()
+    with online_sessions_lock:
+        expired = [sid for sid, ts in list(online_sessions.items()) if now - ts > ONLINE_SESSION_TIMEOUT]
+        for sid in expired:
+            online_sessions.pop(sid, None)
+        return len(online_sessions)
+
+
+# 仅保留内存在线会话，无持久化
+
 
 def _chat_init_db() -> None:
     con = sqlite3.connect(CHAT_SQLITE_PATH)
@@ -555,7 +574,21 @@ def list_txt_files() -> List[str]:
 # -----------------------------
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # 仅更新在线会话心跳
+    now = time.time()
+    sess_id = request.cookies.get(SITE_SESSION_COOKIE, "")
+    if not sess_id:
+        sess_id = _get_token()
+    with online_sessions_lock:
+        online_sessions[sess_id] = now
+        # 清理过期
+        expired = [sid for sid, ts in list(online_sessions.items()) if now - ts > ONLINE_SESSION_TIMEOUT]
+        for sid in expired:
+            online_sessions.pop(sid, None)
+    resp = make_response(render_template("index.html"))
+    max_age = 30 * 24 * 3600
+    resp.set_cookie(SITE_SESSION_COOKIE, sess_id, max_age=max_age)
+    return resp
 
 
 @app.route("/api/txt/list")
@@ -611,6 +644,17 @@ def api_excel_status():
         "current_file": current_excel_file,
     })
     return jsonify(state)
+
+
+@app.route("/api/chat/online_count")
+def api_online_count():
+    # 返回当前在线人数
+    now = time.time()
+    with online_sessions_lock:
+        expired = [sid for sid, ts in list(online_sessions.items()) if now - ts > ONLINE_SESSION_TIMEOUT]
+        for sid in expired:
+            online_sessions.pop(sid, None)
+        return jsonify({"online": len(online_sessions)})
 
 
 @app.route("/api/excel/stream")
@@ -863,8 +907,8 @@ def chat_login():
     user_key = _get_token()
     _update_online_status()
     online_users[user_key] = {"name": nickname, "last_active": time.time()}
-    _add_system_message(f"<strong>{nickname}</strong>已加入")
-    _add_system_message(f"<span class=\"tips-warning\">当前在线人数：{len(online_users)}</span>")
+    online_now = get_site_online_count()
+    _add_system_message(f"欢迎 <strong>{nickname}</strong> 加入:) <span class=\"tips-warning\">当前在线人数：{online_now}</span>")
     resp = make_response(jsonify({
         "name": nickname,
         "key": user_key,
@@ -882,8 +926,8 @@ def chat_logout():
     user_key = request.cookies.get(COOKIE_NAME_PREFIX + "key", "")
     if user_key in online_users:
         online_users.pop(user_key, None)
-        _add_system_message(f"<strong>{username}</strong>已退出")
-        _add_system_message(f"<span class=\"tips-warning\">当前在线人数：{len(online_users)}</span>")
+        online_now = get_site_online_count()
+        _add_system_message(f"<strong>{username}</strong> 已退出 <span class=\"tips-warning\">当前在线人数：{online_now}</span>")
     return jsonify({"result": "success", "version": _get_current_version()})
 
 
@@ -914,7 +958,7 @@ def chat_send():
         "type": "msg",
         "name": username,
         "key": user_key,
-        "msg": message[:1000],
+        "msg": message,
         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M'),
     }
     add_message(msg_obj)
@@ -1038,20 +1082,20 @@ if __name__ == "__main__":
                     t.start()
     except Exception:
         pass
-# # 调试模式，开发时用
-# if __name__ == "__main__":
-#     app.run(host="0.0.0.0", port=5000)
-    # 生产模式，部署时用
-    from waitress import serve
+# 调试模式，开发时用
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+    # # 生产模式，部署时用
+    # from waitress import serve
 
-    # 根据服务器配置(2vCPU/2GB内存)优化并发处理能力
-    serve(
-        app, 
-        host="0.0.0.0", 
-        port=5000,
-        threads=10,             # 适合2核CPU的线程数
-        connection_limit=500,   # 适合2GB内存的连接数
-        channel_timeout=120     # 连接超时时间(秒)
-    )
+    # # 根据服务器配置(2vCPU/2GB内存)优化并发处理能力
+    # serve(
+    #     app, 
+    #     host="0.0.0.0", 
+    #     port=5000,
+    #     threads=10,             # 适合2核CPU的线程数
+    #     connection_limit=500,   # 适合2GB内存的连接数
+    #     channel_timeout=120     # 连接超时时间(秒)
+    # )
 
 

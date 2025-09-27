@@ -177,20 +177,38 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 .announcement-bar {
   background: rgba(42,171,238,0.12);
   color: #0a3b5f;
-  text-align: center;
+  text-align: left;
   padding: 8px;
   font-size: 14px;
   font-weight: 500;
   margin-bottom: 16px;
   border-radius: 4px;
-  white-space: nowrap;
+  white-space: normal;
   overflow: hidden;
 }
 
-.announcement-bar span {
+.announcement-bar .marquee {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.announcement-bar .marquee span {
   display: inline-block;
   padding-left: 100%;
   animation: marquee 15s linear infinite;
+}
+
+.guide-online {
+  margin: 4px 0 12px 0;
+  padding: 6px 10px;
+  display: inline-block;
+  background: #f5f7fb;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #0a3b5f;
+  font-size: 14px;
 }
 
 @keyframes marquee {
@@ -200,12 +218,9 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 
 /* 特殊样式：欢迎页面中的公告栏 */
 .guide-announcement {
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
+  position: static;
   z-index: 100;
-  width: min(90%, 600px);
+  width: 100%;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
 }
 

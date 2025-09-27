@@ -11,13 +11,12 @@
     <div class="app app-single">
       <main class="main">
         <section id="guide" class="guide" aria-labelledby="guideTitle">
-          <!-- 公告栏放在欢迎页面内部，这样当欢迎页面隐藏时，公告栏也会一起隐藏 -->
-          <div class="announcement-bar guide-announcement">
-            <span>公益项目 请勿攻击本站！欢迎加入交流群一起维护此项目</span>
-          </div>
-          
           <div class="guide-content">
-            <h1 id="guideTitle">欢迎使用连词成句</h1>
+            <!-- 顶部公告条：仅一行滚动提示 -->
+            <div class="announcement-bar guide-announcement">
+              <div class="marquee"><span id="marqueeNotice">公益项目 请勿攻击本站！欢迎加入交流群一起维护此项目</span></div>
+            </div>
+            <h1 id="guideTitle" style="text-align:center;">欢迎使用连词成句</h1>
             <p><strong>项目灵感</strong><br>
             该项目灵感源于大语言模型(LLM)的特殊能力：将不相关词汇自然融合到连贯故事中。LLM能"天马行空"地创造情境，将美国当代英语语料库（COCA）使用频率最高的前20,000个单词单词整合成生动有趣的句子，符合人类大脑的记忆规律——故事化、情境化的内容更容易被记住。项目中的每个情境句都是这种能力的体现，让学习者在阅读故事的同时，记住大量词汇。</p>
             
@@ -35,6 +34,7 @@
             <p>- GitHub项目地址：<a href="https://github.com/cheraljun/Huge-Vocabulary" target="_blank">https://github.com/cheraljun/Huge-Vocabulary</a></p>
             <p>- QQ交流群：<strong>1014873476</strong></p>
             <p>- 联系作者微信：<strong>yes_smile_peace</strong></p>
+            <p id="guideOnline" class="guide-online">当前在线人数：--</p>
             
             <button id="guideClose" class="guide-close" type="button">了解了，开始体验</button>
           </div>
@@ -109,7 +109,7 @@
             <div class="chat-container" style="display:none;">
               <div class="chat-box" id="chat-box"></div>
               <div class="input-section" id="chat-section" style="display:none">
-                <input type="text" id="msg" maxlength="1000" placeholder="输入消息..." />
+                <textarea id="msg" rows="1" placeholder="输入消息..."></textarea>
                 <input type="file" id="file-input" style="display: none;" multiple accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt,.zip,.rar">
                 <button id="upload-btn" class="upload-btn" title="上传文件或图片">+</button>
                 <button id="send-btn" class="send-btn">发</button>

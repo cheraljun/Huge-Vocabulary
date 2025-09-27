@@ -104,12 +104,20 @@ $(document).ready(function() {
         }
     });
     
-    $("#msg").on("keypress", function(e) {
-        if (e.keyCode == 13) {
+    // 聊天输入框键盘行为：Enter 发送，Shift+Enter 换行，Ctrl/Cmd+Enter 发送
+    $("#msg").on("keydown", function(e) {
+        var isEnter = (e.key === 'Enter' || e.keyCode === 13);
+        if (!isEnter) return;
+        var hasShift = e.shiftKey === true;
+        var hasCtrlOrMeta = e.ctrlKey === true || e.metaKey === true;
+        if (!hasShift || hasCtrlOrMeta) {
+            e.preventDefault();
             send();
-            return false;
         }
     });
+
+    // 启用输入框自动增高
+    setupChatAutoGrow();
 
     
 
@@ -241,10 +249,41 @@ function send() {
         
         $("#msg").val("");
         $("#msg").focus();
+        resetChatInputHeight();
     }, "json").fail(function() {
         isSending = false;
         addtip('消息发送失败', 'tips-warning');
     });
+}
+
+// ===== 输入框自动增高逻辑（与智能体一致风格） =====
+function setupChatAutoGrow() {
+    var el = document.getElementById('msg');
+    if (!el) return;
+    var base = Math.max(el.scrollHeight, 44);
+    el.dataset.baseHeight = String(base);
+    el.style.overflowY = 'hidden';
+    adjustChatInputHeight();
+    el.addEventListener('input', adjustChatInputHeight);
+    el.addEventListener('focus', adjustChatInputHeight);
+}
+
+function adjustChatInputHeight() {
+    var el = document.getElementById('msg');
+    if (!el) return;
+    el.style.height = 'auto';
+    var maxHeight = 160;
+    var next = Math.min(Math.max(el.scrollHeight, 44), maxHeight);
+    el.style.height = next + 'px';
+    el.style.overflowY = next >= maxHeight ? 'auto' : 'hidden';
+}
+
+function resetChatInputHeight() {
+    var el = document.getElementById('msg');
+    if (!el) return;
+    var base = Number(el.dataset.baseHeight || 44);
+    el.style.height = base + 'px';
+    adjustChatInputHeight();
 }
 
 // 管理员清空标志 - 防止其他检查函数干扰

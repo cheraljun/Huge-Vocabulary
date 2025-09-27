@@ -2,6 +2,7 @@ import { els, initNavigation, showToast, setActiveView } from './dom.js';
 import { loadTxtList } from './text.js';
 import { refreshExcelFiles, refreshExcelStatus } from './dataset.js';
 import { initChat } from './ai_chat.js';
+import { fetchJSON } from './utils.js';
 
 function initCopyButton() {
   if (!els.copyAll) return;
@@ -40,6 +41,13 @@ async function init() {
   initCopyButton();
   initChat();
   initGuide();
+
+  // 首页在线人数
+  try {
+    const stats = await fetchJSON('/api/chat/online_count');
+    const inline = document.getElementById('guideOnline');
+    if (inline && typeof stats.online === 'number') inline.textContent = `当前在线人数：${stats.online}`;
+  } catch {}
 
   // 可选：如果URL带有#chat则直接进入聊天室
   if (location.hash === '#chat') {

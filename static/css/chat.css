@@ -149,15 +149,21 @@ html, body {
     flex-wrap: nowrap;
 }
 
-.input-section input[type="text"] {
+.input-section textarea {
     flex: 1;
     min-width: 0; /* 允许缩小 */
-    padding: 12px 15px;
+    padding: 12px 14px;
     border: 1px solid var(--border-color);
-    border-radius: 20px;
+    border-radius: 16px;
     font-size: 16px;
     box-shadow: 0 1px 2px rgba(0,0,0,0.05);
     background: #ffffff;
+    resize: none;
+    min-height: 44px;
+    max-height: 160px;
+    overflow-y: hidden;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .send-btn, .upload-btn, .private-list-btn {
