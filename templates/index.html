@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>连词成句</title>
     <link rel="stylesheet" href="/static/css/style.css" />
+    <link rel="stylesheet" href="/static/css/chat.css" />
   </head>
   <body>
     <div class="app app-single">
@@ -25,9 +26,9 @@
             <p><strong>功能介绍：</strong></p>
             <ul>
               <li><strong>数据库：</strong>美国当代英语语料库（COCA）覆盖超过10亿词汇，从中筛选出使用频率最高的前20,000个单词，每100词配一条情境句。目前已收录100句（包括10000词），持续更新中。</li>
-              <li><strong>情境句：</strong>按分段阅读示例句，点击单词可跳转查词。由于浏览器限制可能复制失效，请手动选择文本。</li>
-              <li><strong>查词：</strong>查看单词音标与释义，方便学习。</li>
-              <li><strong>AI对话：</strong>填入<a href="https://siliconflow.cn/" target="_blank">硅基流动</a>的API Key，用于辅助翻译，或填入自定义提示词另作他用。</li>
+              <li><strong>情境句：</strong>按分段阅读示例句，点击单词可跳转查询区，支持下载全文。</li>
+              <li><strong>查询区：</strong>查看单词音标与释义，方便学习。</li>
+              <li><strong>智能体：</strong>填入<a href="https://siliconflow.cn/" target="_blank">硅基流动</a>的API Key，用于辅助翻译，或填入自定义提示词另作他用。</li>
             </ul>
             
             <p>有想法或建议？欢迎加入项目维护：</p>
@@ -42,7 +43,7 @@
         <!-- 情境句视图 -->
         <div id="view-segments" class="view" aria-label="情境句视图">
           <section class="center">
-            <div class="center-header"><span>情境句</span><button id="copyAllBtn" class="btn-copy">复制全文</button></div>
+            <div class="center-header"><span>情境句</span><button id="copyAllBtn" class="btn-copy">下载全文</button></div>
             <div id="content" class="center-body"></div>
           </section>
         </div>
@@ -59,19 +60,19 @@
           </div>
         </div>
 
-        <!-- 查词视图 -->
-        <div id="view-lookup" class="view" aria-label="查词视图">
+        <!-- 查询区视图 -->
+        <div id="view-lookup" class="view" aria-label="查询区视图">
           <div class="lookup">
-            <div class="chat-header">查词</div>
+            <div class="chat-header">查询区</div>
             <div id="lookupBody" class="lookup-body"></div>
           </div>
         </div>
 
-        <!-- AI 对话视图 -->
-        <div id="view-ai" class="view" aria-label="AI 对话视图">
+        <!-- 智能体视图 -->
+        <div id="view-ai" class="view" aria-label="智能体视图">
           <div class="ai">
             <div class="chat-header">
-              <div class="chat-title">AI 对话</div>
+              <div class="chat-title">智能体</div>
               <div class="ai-toolbar" role="group" aria-label="对话设置">
                 <label class="sr-only" for="aiModel">对话模型</label>
                 <select id="aiModel" title="对话模型"></select>
@@ -92,16 +93,55 @@
             </form>
           </div>
         </div>
+
+        <!-- 聊天室视图 -->
+        <div id="view-chat" class="view" aria-label="聊天室视图">
+          <div class="container">
+            <div class="login-section" id="login-section" style="display:flex; align-items:center; justify-content:center;">
+              <div style="display:flex; flex-direction:column; align-items:center; gap:12px; text-align:center;">
+                <div style="font-size: 1rem; color:#111;">进入聊天室，请文明聊天</div>
+                <button id="login-btn" style="background:var(--blue); color:#fff; padding:8px 14px; border:none; border-radius:6px; cursor:pointer; font-size:14px;">我已知晓，确认进入</button>
+              </div>
+              <input type="text" id="nick" maxlength="10" style="display:none;" />
+              <input type="password" id="pwd" maxlength="20" style="display:none;" />
+            </div>
+
+            <div class="chat-container" style="display:none;">
+              <div class="chat-box" id="chat-box"></div>
+              <div class="input-section" id="chat-section" style="display:none">
+                <input type="text" id="msg" maxlength="1000" placeholder="输入消息..." />
+                <input type="file" id="file-input" style="display: none;" multiple accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt,.zip,.rar">
+                <button id="upload-btn" class="upload-btn" title="上传文件或图片">+</button>
+                <button id="send-btn" class="send-btn">发</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 图片模态框 -->
+          <div id="image-modal" class="image-modal" onclick="closeImageModal()">
+            <div class="image-modal-content">
+              <img id="modal-image" src="" alt="查看图片" onclick="closeImageModal()">
+            </div>
+          </div>
+
+          <!-- 头像菜单（已移除私聊入口） -->
+          <div id="avatar-menu" class="avatar-menu">
+            <div class="avatar-menu-item mention" data-action="mention">@ 提及用户</div>
+          </div>
+        </div>
       </main>
 
       <nav class="bottom-nav" role="tablist" aria-label="主导航">
         <button class="tab" data-view="database" role="tab" aria-selected="false">数据库</button>
         <button class="tab" data-view="segments" role="tab" aria-selected="false">情境句</button>
-        <button class="tab" data-view="lookup" role="tab" aria-selected="false">查词</button>
-        <button class="tab" data-view="ai" role="tab" aria-selected="false">AI 对话</button>
+        <button class="tab" data-view="lookup" role="tab" aria-selected="false">查询区</button>
+        <button class="tab" data-view="ai" role="tab" aria-selected="false">智能体</button>
+        <button class="tab" data-view="chat" role="tab" aria-selected="false">聊天室</button>
       </nav>
     </div>
 
     <script type="module" src="/static/js/main.js"></script>
+    <script src="/static/js/jquery.min.js"></script>
+    <script src="/static/js/chatroom.js"></script>
   </body>
 </html>

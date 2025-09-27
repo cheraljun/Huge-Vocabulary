@@ -1,4 +1,5 @@
 import { els, showToast, setActiveView } from './dom.js';
+import { focusChat } from './ai_chat.js';
 import { fetchJSON } from './utils.js';
 import { renderLookupCard, renderLookupError, renderLookupNotFound } from './lookup.js';
 
@@ -24,6 +25,10 @@ function parseMarkedTokens(text) {
 export function renderSentenceCenter(text) {
   if (!els.content) return;
   window.__currentTxtFull = String(text || '');
+  if (!window.__currentTxtName) {
+    // 保底：若未在列表点击时设置名称，则使用默认
+    window.__currentTxtName = '全文';
+  }
   const parts = parseMarkedTokens(text || '');
   const container = document.createElement('div');
   container.className = 'sentence';
@@ -75,22 +80,37 @@ function renderTextWithClickableWords(text) {
   return fragment;
 }
 
+function fallbackToAI(word) {
+  try {
+    focusChat();
+    if (els.aiInput) {
+      els.aiInput.value = String(word || '');
+    }
+    if (els.aiComposerForm && typeof els.aiComposerForm.requestSubmit === 'function') {
+      els.aiComposerForm.requestSubmit();
+    } else if (els.aiComposerForm) {
+      const evt = new Event('submit', { bubbles: true, cancelable: true });
+      els.aiComposerForm.dispatchEvent(evt);
+    }
+  } catch (e) {
+    // 最坏情况下给出提示
+    showToast('已为你跳转到智能体');
+    setActiveView('ai');
+  }
+}
+
 async function lookupWord(word) {
   try {
-    const data = await fetchJSON(`/api/excel/search?word=${encodeURIComponent(word)}`);
-    if (!data.matches || data.matches.length === 0) {
-      renderLookupNotFound(word);
+    const data = await fetchJSON(`/api/lookup?word=${encodeURIComponent(word)}`);
+    if (!data || !data.row) {
+      // 未命中：自动跳转到智能体并发送该词
+      fallbackToAI(word);
       return;
     }
-    const first = data.matches[0];
-    try {
-      const record = await fetchJSON(`/api/excel/row?sheet=${encodeURIComponent(first.sheet)}&row_index=${encodeURIComponent(first.row_index)}`);
-      renderLookupCard(word, first.sheet, first.row_index, record.row);
-    } catch (err) {
-      renderLookupError(`读取行失败：${err.message}`);
-    }
+    renderLookupCard(word, '', 0, data.row);
   } catch (err) {
-    renderLookupError(`查询失败：${err.message}`);
+    // 404 或其他错误：同样走智能体兜底
+    fallbackToAI(word);
   }
 }
 
@@ -115,6 +135,7 @@ export async function loadTxtList() {
           const baseName = String(name).replace(/\.[^.]+$/, '');
           // 移除确认窗口，改用Toast通知
           renderSentenceCenter(text);
+          window.__currentTxtName = baseName;
           if (activeTile && activeTile !== tile) {
             activeTile.classList.remove('active');
           }

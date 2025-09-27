@@ -13,7 +13,7 @@ export function renderLookupCard(word, sheet, rowIndex, rowData) {
   container.className = 'lookup-card';
   container.innerHTML = `
     <div class="lookup-title">${escapeHtml(word)}</div>
-    <div class="lookup-meta">工作表：${escapeHtml(sheet)} · 行：${rowIndex}</div>
+    <div class="lookup-meta"></div>
     <div class="lookup-kv">
       <div class="k">单词</div>
       <div>${highlightText(rowData?.['1'] || '', word)}<div class="small mono">(${escapeHtml(word)})</div></div>

@@ -3,6 +3,7 @@ const views = {
   segments: document.getElementById('view-segments'),
   lookup: document.getElementById('view-lookup'),
   ai: document.getElementById('view-ai'),
+  chat: document.getElementById('view-chat'),
 };
 
 const tabs = Array.from(document.querySelectorAll('.bottom-nav .tab'));
@@ -21,6 +22,7 @@ export const els = {
   aiComposerForm: document.getElementById('aiComposerForm'),
   content: document.getElementById('content'),
   copyAll: document.getElementById('copyAllBtn'),
+  // chat room elements can be queried by id directly when needed
 };
 
 let toastTimer = null;

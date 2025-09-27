@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 
-from flask import Flask, jsonify, request, render_template, Response, stream_with_context
+from flask import Flask, jsonify, request, render_template, Response, stream_with_context, make_response, send_from_directory
 import pandas as pd
 import requests
 
@@ -24,6 +24,218 @@ EXCEL_EXTENSIONS = {".xlsx", ".xls"}
 DATA_DIR = os.path.join(BASE_DIR, "data_sentence")
 SQLITE_DB_PATH = os.path.join(DATA_DIR, "coca.sqlite")
 STATE_FILE_PATH = os.path.join(DATA_DIR, "loading_state.json")
+
+# -----------------------------
+# Chat Config
+# -----------------------------
+DATA_CHAT_DIR = os.path.join(BASE_DIR, "data_chat")
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+CHAT_SQLITE_PATH = os.path.join(DATA_CHAT_DIR, "chat.sqlite")
+COOKIE_NAME_PREFIX = "chat_"
+
+os.makedirs(DATA_CHAT_DIR, exist_ok=True)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Allowed file types for uploads
+ALLOWED_EXTENSIONS = {
+    "image": {"jpg", "jpeg", "png", "gif", "bmp", "webp"},
+    "video": {"mp4", "avi", "mov", "wmv", "flv", "webm"},
+    "audio": {"mp3", "wav", "flac", "aac", "ogg"},
+    "document": {"pdf", "doc", "docx", "txt", "rtf"},
+    "archive": {"zip", "rar", "7z", "tar", "gz"},
+}
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+
+# In-memory state for chat
+online_users: Dict[str, Dict[str, Any]] = {}
+
+# Locks and cache
+file_locks = {
+    "messages": threading.RLock(),
+    "version": threading.RLock(),
+}
+
+message_cache: Dict[str, Any] = {
+    "version": 0,
+}
+
+def _chat_init_db() -> None:
+    con = sqlite3.connect(CHAT_SQLITE_PATH)
+    try:
+        cur = con.cursor()
+        # Pragmas for durability + reasonable performance
+        cur.execute("PRAGMA journal_mode=WAL;")
+        cur.execute("PRAGMA synchronous=NORMAL;")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              content TEXT NOT NULL
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_meta (
+              key TEXT PRIMARY KEY,
+              value TEXT
+            );
+            """
+        )
+        # Initialize version
+        cur.execute("INSERT OR IGNORE INTO chat_meta(key, value) VALUES('version','0')")
+        con.commit()
+    finally:
+        con.close()
+
+_chat_init_db()
+
+def _allowed_file(filename: str) -> bool:
+    if "." not in filename:
+        return False
+    ext = filename.rsplit(".", 1)[1].lower()
+    for exts in ALLOWED_EXTENSIONS.values():
+        if ext in exts:
+            return True
+    return False
+
+def _get_file_type(filename: str) -> str:
+    if "." not in filename:
+        return "other"
+    ext = filename.rsplit(".", 1)[1].lower()
+    for file_type, exts in ALLOWED_EXTENSIONS.items():
+        if ext in exts:
+            return file_type
+    return "other"
+
+def _unique_filename(filename: str) -> str:
+    name, ext = os.path.splitext(filename)
+    return f"{int(time.time()*1000)}_{os.getpid()}{ext}"
+
+def _get_current_version() -> int:
+    with file_locks["version"]:
+        try:
+            con = sqlite3.connect(CHAT_SQLITE_PATH)
+            cur = con.cursor()
+            cur.execute("SELECT value FROM chat_meta WHERE key='version'")
+            row = cur.fetchone()
+            con.close()
+            version = int(row[0]) if row and row[0] is not None else 0
+            message_cache["version"] = version
+            return version
+        except Exception:
+            return 0
+
+def _increment_version() -> int:
+    with file_locks["version"]:
+        cur_v = _get_current_version()
+        new_v = cur_v + 1
+        con = sqlite3.connect(CHAT_SQLITE_PATH)
+        try:
+            c = con.cursor()
+            c.execute("UPDATE chat_meta SET value=? WHERE key='version'", (str(new_v),))
+            con.commit()
+        finally:
+            con.close()
+        message_cache["version"] = new_v
+        return new_v
+
+def _rand_nick() -> str:
+    adjectives = [
+        "雀跃", "沉思", "慵懒", "俏皮", "优雅", "狂野", "内敛", "天真", "狡黠",
+        "矜持", "奔放", "恬淡", "热烈", "疏离", "缠绵", "激昂", "颓废", "通透", "迷离",
+        "空灵", "炽热", "温润", "冷冽", "璀璨", "朦胧", "锐利", "柔和", "深邃",
+    ]
+    nouns = [
+        "猫", "狗", "兔", "熊", "狼", "貘", "鸭嘴兽", "犰狳", "树懒", "蜜獾",
+        "食蚁兽", "狐獴", "水豚", "指猴", "袋熊", "麒麟", "凤凰", "独角兽", "狮鹫", "龙猫",
+        "儒艮", "海天使", "翻车鱼", "灯塔水母", "叶海龙", "极乐鸟", "犀鸟", "鲸头鹳", "几维鸟", "冠蕉鹃",
+        "蓝宝石螳螂虾", "吉丁虫", "蓝闪蝶", "长颈鹿象鼻虫", "彩虹锹甲",
+    ]
+    import random
+    return random.choice(adjectives) + random.choice(nouns)
+
+def _get_token() -> str:
+    import random
+    return str(int(time.time()*1000)) + str(random.randint(1000, 9999))
+
+def _add_system_message(msg: str) -> None:
+    add_message({"type": "sys", "msg": f"<span class=\"tips-warning\">{msg}</span>"})
+
+def _update_online_status() -> None:
+    now = time.time()
+    timeout_keys: List[str] = []
+    for uk, info in list(online_users.items()):
+        if now - info.get("last_active", 0) > 900:
+            timeout_keys.append(uk)
+    for uk in timeout_keys:
+        username = online_users.get(uk, {}).get("name", "")
+        online_users.pop(uk, None)
+        _add_system_message(f"<strong>{username}</strong>已超时退出")
+        _add_system_message(f"<span class=\"tips-warning\">当前在线人数：{len(online_users)}</span>")
+        _increment_version()
+
+def _clear_uploads() -> None:
+    try:
+        for filename in os.listdir(UPLOAD_DIR):
+            fp = os.path.join(UPLOAD_DIR, filename)
+            try:
+                if os.path.isfile(fp):
+                    os.remove(fp)
+            except Exception:
+                pass
+    except FileNotFoundError:
+        pass
+
+def chat_total_messages() -> int:
+    con = sqlite3.connect(CHAT_SQLITE_PATH)
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT COUNT(*) FROM chat_messages")
+        (cnt,) = cur.fetchone()
+        return int(cnt or 0)
+    finally:
+        con.close()
+
+def chat_fetch_messages(offset: int, limit: int = 1000) -> List[str]:
+    con = sqlite3.connect(CHAT_SQLITE_PATH)
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT content FROM chat_messages ORDER BY id ASC LIMIT ? OFFSET ?", (int(limit), int(offset)))
+        rows = cur.fetchall()
+        return [r[0] for r in rows]
+    finally:
+        con.close()
+
+def add_message(message_obj: Dict[str, Any]) -> int:
+    content = json.dumps(message_obj, ensure_ascii=False, separators=(",", ":"))
+    con = sqlite3.connect(CHAT_SQLITE_PATH)
+    try:
+        cur = con.cursor()
+        cur.execute("INSERT INTO chat_messages(content) VALUES(?)", (content,))
+        con.commit()
+        # cap to latest 10000
+        cur.execute("SELECT COUNT(*) FROM chat_messages")
+        (cnt,) = cur.fetchone()
+        surplus = int(cnt or 0) - 10000
+        if surplus > 0:
+            cur.execute(
+                "DELETE FROM chat_messages WHERE id IN (SELECT id FROM chat_messages ORDER BY id ASC LIMIT ?)",
+                (surplus,),
+            )
+            con.commit()
+        return int(cnt or 0)
+    finally:
+        con.close()
+
+def clear_messages() -> None:
+    con = sqlite3.connect(CHAT_SQLITE_PATH)
+    try:
+        cur = con.cursor()
+        cur.execute("DELETE FROM chat_messages")
+        con.commit()
+    finally:
+        con.close()
 
 
 class LoadingStateStore:
@@ -567,6 +779,35 @@ def api_excel_search():
         return jsonify({"error": f"db error: {exc}"}), 500
 
 
+@app.route("/api/lookup")
+def api_lookup():
+    if not app.config.get("DATA_LOADED", False):
+        return jsonify({"error": "loading or db not ready"}), 400
+    word = request.args.get("word", "").strip()
+    if not word:
+        return jsonify({"error": "missing word"}), 400
+    norm = normalize_word(word)
+    try:
+        con = sqlite3.connect(SQLITE_DB_PATH)
+        cur = con.cursor()
+        cur.execute(
+            "SELECT word, phonetic, meaning FROM entries WHERE word_norm = ? LIMIT 1",
+            (norm,),
+        )
+        result = cur.fetchone()
+        con.close()
+        if not result:
+            return jsonify({"error": "not found"}), 404
+        w, phonetic, meaning = result
+        row_obj = {
+            "1": w or "",
+            "2": phonetic or "",
+            "3": meaning or "",
+        }
+        return jsonify({"word": word, "row": row_obj})
+    except Exception as exc:
+        return jsonify({"error": f"db error: {exc}"}), 500
+
 @app.route("/api/excel/row")
 def api_excel_row():
     if not app.config.get("DATA_LOADED", False):
@@ -602,6 +843,154 @@ def api_excel_row():
         })
     except Exception as exc:
         return jsonify({"error": f"db error: {exc}"}), 500
+
+
+# -----------------------------
+# Chat Routes (integrated)
+# -----------------------------
+
+@app.route("/uploads/<path:filename>")
+def chat_uploaded_file(filename: str):
+    return send_from_directory(UPLOAD_DIR, filename)
+
+
+@app.route("/login", methods=["POST"])
+def chat_login():
+    data = request.get_json(silent=True) or {}
+    nickname = (data.get("n") or "").strip()
+    if not nickname:
+        nickname = _rand_nick()
+    user_key = _get_token()
+    _update_online_status()
+    online_users[user_key] = {"name": nickname, "last_active": time.time()}
+    _add_system_message(f"<strong>{nickname}</strong>已加入")
+    _add_system_message(f"<span class=\"tips-warning\">当前在线人数：{len(online_users)}</span>")
+    resp = make_response(jsonify({
+        "name": nickname,
+        "key": user_key,
+        "version": _get_current_version(),
+    }))
+    max_age = 90 * 24 * 3600
+    resp.set_cookie(COOKIE_NAME_PREFIX + "name", nickname, max_age=max_age)
+    resp.set_cookie(COOKIE_NAME_PREFIX + "key", user_key, max_age=max_age)
+    return resp
+
+
+@app.route("/logout", methods=["POST"])
+def chat_logout():
+    username = request.cookies.get(COOKIE_NAME_PREFIX + "name", "")
+    user_key = request.cookies.get(COOKIE_NAME_PREFIX + "key", "")
+    if user_key in online_users:
+        online_users.pop(user_key, None)
+        _add_system_message(f"<strong>{username}</strong>已退出")
+        _add_system_message(f"<span class=\"tips-warning\">当前在线人数：{len(online_users)}</span>")
+    return jsonify({"result": "success", "version": _get_current_version()})
+
+
+@app.route("/heartbeat", methods=["POST"])
+def chat_heartbeat():
+    user_key = request.cookies.get(COOKIE_NAME_PREFIX + "key", "")
+    if user_key in online_users:
+        online_users[user_key]["last_active"] = time.time()
+    return jsonify({"result": "success"})
+
+
+@app.route("/send", methods=["POST"])
+def chat_send():
+    message = (request.form.get("msg") or "").strip()
+    if not message:
+        return jsonify({"result": "error", "message": "消息不能为空"}), 400
+    username = request.cookies.get(COOKIE_NAME_PREFIX + "name", "匿名")
+    user_key = request.cookies.get(COOKIE_NAME_PREFIX + "key", "")
+    if user_key in online_users:
+        online_users[user_key]["last_active"] = time.time()
+    if message == "/rm127.0.0.1":
+        clear_messages()
+        _clear_uploads()
+        new_v = _increment_version()
+        _add_system_message("💥 已清空所有聊天记录与上传文件！")
+        return jsonify({"result": "success", "version": new_v, "admin_clear": True})
+    msg_obj = {
+        "type": "msg",
+        "name": username,
+        "key": user_key,
+        "msg": message[:1000],
+        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M'),
+    }
+    add_message(msg_obj)
+    return jsonify({"result": "success", "version": _get_current_version()})
+
+
+@app.route("/upload", methods=["POST"])
+def chat_upload():
+    username = request.cookies.get(COOKIE_NAME_PREFIX + "name", "匿名")
+    user_key = request.cookies.get(COOKIE_NAME_PREFIX + "key", "")
+    if user_key in online_users:
+        online_users[user_key]["last_active"] = time.time()
+    if 'files[]' not in request.files:
+        return jsonify({'result': 'error', 'message': '没有选择文件'}), 400
+    files = request.files.getlist('files[]')
+    if not files or all(f.filename == '' for f in files):
+        return jsonify({'result': 'error', 'message': '没有选择文件'}), 400
+    uploaded_files = []
+    for file in files:
+        if not file or file.filename == '':
+            continue
+        if not _allowed_file(file.filename):
+            continue
+        file.seek(0, os.SEEK_END)
+        size = file.tell()
+        file.seek(0)
+        if size > MAX_FILE_SIZE:
+            return jsonify({'result': 'error', 'message': f'文件 {file.filename} 超过大小限制 (50MB)'}), 400
+        from werkzeug.utils import secure_filename
+        original_filename = secure_filename(file.filename)
+        unique_filename = _unique_filename(original_filename)
+        save_path = os.path.join(UPLOAD_DIR, unique_filename)
+        file.save(save_path)
+        file_info = {
+            'name': original_filename,
+            'filename': unique_filename,
+            'size': size,
+            'type': _get_file_type(original_filename),
+        }
+        msg = {
+            'type': 'file',
+            'name': username,
+            'key': user_key,
+            'fileInfo': file_info,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        }
+        add_message(msg)
+        uploaded_files.append(file_info)
+    new_v = _increment_version()
+    return jsonify({'result': 'success', 'files': uploaded_files, 'version': new_v})
+
+
+@app.route("/msg", methods=["GET"])
+def chat_get_messages():
+    last_index = int(request.args.get('k', 0))
+    client_version = int(request.args.get('v', 0))
+    server_version = _get_current_version()
+    _update_online_status()
+    if client_version != server_version:
+        return jsonify({'reset': True, 'version': server_version})
+    total = chat_total_messages()
+    if last_index >= total:
+        return jsonify({'count': total, 'list': [], 'version': server_version})
+    start_index = max(0, total - 1000)
+    start_index = max(start_index, last_index)
+    limit = min(1000, total - start_index)
+    raw_list = chat_fetch_messages(start_index, limit)
+    users = set()
+    for s in raw_list:
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict) and obj.get('type') == 'msg' and obj.get('name'):
+                users.add(obj['name'])
+        except Exception:
+            pass
+    return jsonify({'count': total, 'list': raw_list, 'version': server_version, 'users': list(users)})
 
 
 # No auto-loading. Data is loaded via /api/excel/load
@@ -649,18 +1038,20 @@ if __name__ == "__main__":
                     t.start()
     except Exception:
         pass
-# if __name__ == "__main__":
-#     app.run(host="0.0.0.0", port=5000)
-    from waitress import serve
+# 调试模式，开发时用
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+    # 生产模式，部署时用
+    # from waitress import serve
 
-    # 根据服务器配置(2vCPU/2GB内存)优化并发处理能力
-    serve(
-        app, 
-        host="0.0.0.0", 
-        port=5000,
-        threads=10,             # 适合2核CPU的线程数
-        connection_limit=500,   # 适合2GB内存的连接数
-        channel_timeout=120     # 连接超时时间(秒)
-    )
+    # # 根据服务器配置(2vCPU/2GB内存)优化并发处理能力
+    # serve(
+    #     app, 
+    #     host="0.0.0.0", 
+    #     port=5000,
+    #     threads=10,             # 适合2核CPU的线程数
+    #     connection_limit=500,   # 适合2GB内存的连接数
+    #     channel_timeout=120     # 连接超时时间(秒)
+    # )
 
 
