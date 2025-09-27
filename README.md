@@ -27,7 +27,7 @@ Huge Vocabulary从中筛选出使用频率最高的前20,000个单词，每100�
 ## 快速开始
 
 **在线使用**：
-- 主站: [vocabulary.top](vocabulary.top)
+- 主站: [http://vocabulary.top](http://vocabulary.top)
 
 **本地部署**：
 ```bash
